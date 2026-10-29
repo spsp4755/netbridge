@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+netbridge-proto.workspace = true
 serde.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

@@ -11,6 +11,7 @@ name = "netbridge-server"
 path = "src/main.rs"
 
 [dependencies]
+netbridge-scan.workspace = true
 netbridge-proto.workspace = true
 netbridge-pii.workspace = true
 serde.workspace = true
@@ -43,6 +44,7 @@ async-trait = "0.1"
 windows-service = "0.7"
 
 [dev-dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "__rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots-no-provider", "json"] }
 sha2 = "0.10"

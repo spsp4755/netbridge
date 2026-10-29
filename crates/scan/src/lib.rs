@@ -9,40 +9,7 @@ pub use external::{run_external, ExternalOutcome, ExternalScanner};
 
 use std::io::{Read, Seek};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum ThreatKind {
-    Executable,
-    Script,
-    Macro,
-    PdfActive,
-    ArchiveDanger,
-    Encrypted,
-    AvInfected,
-    ScannerError,
-}
-
-impl ThreatKind {
-    pub const ALL: [ThreatKind; 8] = [Self::Executable, Self::Script, Self::Macro, Self::PdfActive, Self::ArchiveDanger, Self::Encrypted, Self::AvInfected, Self::ScannerError];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Executable => "실행 파일",
-            Self::Script => "스크립트",
-            Self::Macro => "문서 매크로",
-            Self::PdfActive => "PDF 실행 요소",
-            Self::ArchiveDanger => "위험한 압축",
-            Self::Encrypted => "암호 걸린 파일",
-            Self::AvInfected => "백신 탐지",
-            Self::ScannerError => "검사기 오류",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Finding {
-    pub kind: ThreatKind,
-    pub detail: String,
-}
+pub use netbridge_proto::{Finding, ThreatKind};
 
 /// 스크립트로 보는 확장자(소문자). 실행 파일 확장자는 압축 안 이름 검사에만 쓴다.
 pub const SCRIPT_EXTS: &[&str] = &["bat", "cmd", "ps1", "psm1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "hta", "reg", "sh", "lnk"];

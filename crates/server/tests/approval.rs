@@ -307,3 +307,72 @@ async fn approver_and_proxy_cannot_both_decide() {
     );
     assert!(r1.is_ok() != r2.is_ok(), "exactly one decision wins: {r1:?} {r2:?}");
 }
+
+fn fake_pe() -> Vec<u8> {
+    let mut b = vec![0u8; 0x80];
+    b[0] = b'M';
+    b[1] = b'Z';
+    b[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    b[0x40..0x44].copy_from_slice(b"PE\0\0");
+    b
+}
+
+fn macro_docx() -> Vec<u8> {
+    use std::io::Write;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let o = zip::write::SimpleFileOptions::default();
+    w.start_file("[Content_Types].xml", o).unwrap();
+    w.write_all(b"<Types/>").unwrap();
+    w.start_file("word/vbaProject.bin", o).unwrap();
+    w.write_all(b"vba").unwrap();
+    w.finish().unwrap().into_inner()
+}
+
+/// Content scan, not the extension: an executable renamed to .txt is blocked on the route's default action.
+#[tokio::test]
+async fn disguised_executable_is_blocked() {
+    let k = kit();
+    let (ta, _) = k.pair().await;
+    let t = k.send(NetId::internal(), &ta, "report.txt", &fake_pe()).await.unwrap();
+    assert_eq!(t.state, TransferState::Blocked, "{t:?}");
+    assert!(t.block_reason.unwrap().contains("실행 파일"));
+    assert_eq!(t.threats[0].kind, ThreatKind::Executable);
+}
+
+/// A macro forces pre-approval even where the route's rule says post-approval; the route can lower it to log-only.
+#[tokio::test]
+async fn macro_document_forces_pre_approval_per_route() {
+    let k = kit();
+    let (ta, _) = k.pair().await;
+    k.set_route_rules(Kit::int_ext(), vec![rule(ApprovalMode::Post)]);
+    let t = k.send(NetId::internal(), &ta, "plan.docx", &macro_docx()).await.unwrap();
+    assert_eq!((t.state, t.mode), (TransferState::Pending, Some(ApprovalMode::Pre)), "{t:?}");
+    assert_eq!(t.threats[0].kind, ThreatKind::Macro);
+    let mut p = k.core.route_policy(&Kit::int_ext()).unwrap();
+    p.threat_actions = vec![(ThreatKind::Macro, PiiAction::LogOnly)];
+    k.core.set_route_policy(&p).unwrap();
+    let t = k.send(NetId::internal(), &ta, "plan2.docx", &macro_docx()).await.unwrap();
+    assert_eq!(t.mode, Some(ApprovalMode::Post));
+}
+
+/// A CDR tool rebuilds the file in place; the transfer then carries the new size and hash and delivers the clean copy.
+#[cfg(unix)]
+#[tokio::test]
+async fn cdr_output_replaces_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let peer = std::sync::Arc::new(FakePeer::default());
+    let mut core = netbridge_server::core::Core::two_network(netbridge_server::db::Db::open_memory().unwrap(), dir.path().to_path_buf(), peer.clone()).unwrap();
+    core.scanners = vec![netbridge_scan::ExternalScanner {
+        name: "cdr".into(),
+        cdr_command: vec!["sh".into(), "-c".into(), "printf clean > \"$1\"".into(), "sh".into(), "{out}".into()],
+        ..Default::default()
+    }];
+    core.clock.set(1_800_000_000);
+    let k = Kit { core: std::sync::Arc::new(core), peer, _dir: dir };
+    let (ta, _) = k.pair().await;
+    k.set_route_rules(Kit::int_ext(), vec![rule(ApprovalMode::Post)]);
+    let t = k.send(NetId::internal(), &ta, "memo.txt", b"original with active content").await.unwrap();
+    assert_eq!(t.state, TransferState::Available, "{t:?}");
+    assert_eq!((t.size, t.sha256.clone()), (5, sha_hex(b"clean")));
+    assert_eq!(k.peer.files.lock().unwrap().get(&t.id).map(|b| b.as_slice()), Some(&b"clean"[..]));
+}

@@ -64,7 +64,9 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
             }
             let db = Db::open(&cfg.db_path())?;
             let topo = cfg.topology.clone().expect("hub topology");
-            let core = Arc::new(Core::new(db, cfg.data_dir.clone(), cfg.network.clone(), topo, peers)?);
+            let mut core = Core::new(db, cfg.data_dir.clone(), cfg.network.clone(), topo, peers)?;
+            core.scanners = cfg.scanners.clone();
+            let core = Arc::new(core);
             let link_tls = Arc::new(client_tls(&cfg)?);
             let mut tasks = vec![];
             for l in &cfg.links {
@@ -96,6 +98,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
                 hub: Hub::default(),
                 neighbors,
                 topo: Default::default(),
+                scanners: cfg.scanners.clone(),
             });
             let link_tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert)?;
             let (link_addr, h1) = serve(cfg.link_listen.unwrap(), link_tls, link_router(relay.clone()))?;

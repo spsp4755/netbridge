@@ -31,6 +31,8 @@ pub struct Relay {
     pub neighbors: HashMap<NetId, LinkPeer>,
     /// Last layout received from the central server.
     pub topo: Mutex<Option<Topology>>,
+    /// Antivirus / CDR tools run on files stored here.
+    pub scanners: Vec<netbridge_scan::ExternalScanner>,
 }
 
 const API_TIMEOUT: Duration = Duration::from_secs(600);
@@ -156,7 +158,8 @@ struct ScanReq {
 
 async fn scan(State(r): State<R>, Path(id): Path<i64>, Json(q): Json<ScanReq>) -> Result<Response, ErrResp> {
     let path = r.files.path(id);
-    let res = tokio::task::spawn_blocking(move || scan_path(&q.name, &path, &q.policy)).await.map_err(ApiError::internal)?;
+    let scanners = r.scanners.clone();
+    let res = tokio::task::spawn_blocking(move || scan_path(&q.name, &path, &q.policy, &scanners)).await.map_err(ApiError::internal)?;
     let res = res.map_err(|_| ApiError::bad("올린 파일이 없습니다"))?;
     Ok(Json(res).into_response())
 }
@@ -219,6 +222,7 @@ mod tests {
             hub: Hub::default(),
             neighbors: HashMap::new(),
             topo: Default::default(),
+            scanners: vec![],
         })
     }
 

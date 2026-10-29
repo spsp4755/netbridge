@@ -34,8 +34,14 @@ pub struct CallCtx {
 pub struct ScanResult {
     pub hits: Vec<PiiHit>,
     pub unscannable: bool,
+    /// Size and hash of the file as uploaded (checked against what the sender declared).
     pub size: u64,
     pub sha256: String,
+    #[serde(default)]
+    pub threats: Vec<Finding>,
+    /// Size and hash after a CDR tool rebuilt the file in place.
+    #[serde(default)]
+    pub cdr: Option<(u64, String)>,
 }
 
 /// Operations on another network's server, driven by the central server.
@@ -61,16 +67,28 @@ pub fn scan_bytes(name: &str, bytes: &[u8], policy: &Policy) -> ScanResult {
     let sha256 = hex::encode(sha2::Sha256::digest(bytes));
     let size = bytes.len() as u64;
     match netbridge_pii::extract_text(name, bytes) {
-        netbridge_pii::Extracted::Text(t) => ScanResult { hits: netbridge_pii::scan_text(&t, &policy.pii_rules), unscannable: false, size, sha256 },
-        netbridge_pii::Extracted::Unscannable(_) => ScanResult { hits: vec![], unscannable: true, size, sha256 },
+        netbridge_pii::Extracted::Text(t) => ScanResult { hits: netbridge_pii::scan_text(&t, &policy.pii_rules), unscannable: false, size, sha256, threats: vec![], cdr: None },
+        netbridge_pii::Extracted::Unscannable(_) => ScanResult { hits: vec![], unscannable: true, size, sha256, threats: vec![], cdr: None },
     }
 }
 
 /// shortcut: files above this are not read into memory for PII scanning and count as unscannable; stream extraction if large text files must be scanned.
 pub const MAX_SCAN_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Scans a file on local disk (see MAX_SCAN_BYTES).
-pub fn scan_path(name: &str, path: &Path, policy: &Policy) -> std::io::Result<ScanResult> {
+/// PII and content scan of a file on this server's disk, then the configured antivirus and CDR tools.
+pub fn scan_path(name: &str, path: &Path, policy: &Policy, scanners: &[netbridge_scan::ExternalScanner]) -> std::io::Result<ScanResult> {
+    let mut r = scan_pii(name, path, policy)?;
+    r.threats = netbridge_scan::scan_builtin(path, name);
+    let ext = netbridge_scan::run_external(path, scanners);
+    r.threats.extend(ext.findings);
+    if ext.replaced {
+        r.cdr = Some((std::fs::metadata(path)?.len(), crate::files::sha256_of(path)?));
+    }
+    Ok(r)
+}
+
+/// PII scan of a file on local disk (see MAX_SCAN_BYTES).
+fn scan_pii(name: &str, path: &Path, policy: &Policy) -> std::io::Result<ScanResult> {
     let size = std::fs::metadata(path)?.len();
     if size > MAX_SCAN_BYTES {
         let files_sha = {
@@ -80,7 +98,7 @@ pub fn scan_path(name: &str, path: &Path, policy: &Policy) -> std::io::Result<Sc
             std::io::copy(&mut f, &mut h)?;
             hex::encode(h.finalize())
         };
-        return Ok(ScanResult { hits: vec![], unscannable: true, size, sha256: files_sha });
+        return Ok(ScanResult { hits: vec![], unscannable: true, size, sha256: files_sha, threats: vec![], cdr: None });
     }
     Ok(scan_bytes(name, &std::fs::read(path)?, policy))
 }
@@ -120,6 +138,8 @@ pub struct Core {
     pub net: NetId,
     pub topo: Topology,
     pub peers: HashMap<NetId, Arc<dyn Peer>>,
+    /// Antivirus / CDR tools run on files this server stores.
+    pub scanners: Vec<netbridge_scan::ExternalScanner>,
     pub clock: Clock,
 }
 
@@ -137,7 +157,7 @@ pub struct Caller {
 impl Core {
     pub fn new(db: Db, data_dir: PathBuf, net: NetId, topo: Topology, peers: HashMap<NetId, Arc<dyn Peer>>) -> anyhow::Result<Core> {
         let files = Files::new(data_dir.join("files"))?;
-        let core = Core { db, data_dir, files, hub: Hub::default(), net, topo, peers, clock: Clock::default() };
+        let core = Core { db, data_dir, files, hub: Hub::default(), net, topo, peers, scanners: vec![], clock: Clock::default() };
         core.migrate_route_policies().map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(core)
     }

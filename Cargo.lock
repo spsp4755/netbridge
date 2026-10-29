@@ -2803,6 +2803,7 @@ dependencies = [
 name = "netbridge-scan"
 version = "0.3.0"
 dependencies = [
+ "netbridge-proto",
  "serde",
  "serde_json",
  "zip",
@@ -2823,6 +2824,7 @@ dependencies = [
  "hex",
  "netbridge-pii",
  "netbridge-proto",
+ "netbridge-scan",
  "rand 0.8.8",
  "rcgen",
  "reqwest",
@@ -2841,6 +2843,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "windows-service",
+ "zip",
 ]
 
 [[package]]

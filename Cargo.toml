@@ -13,6 +13,7 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
 netbridge-proto = { path = "crates/proto" }
 netbridge-pii = { path = "crates/pii" }
+netbridge-scan = { path = "crates/scan" }
 netbridge-server = { path = "crates/server" }
 netbridge-clientcore = { path = "crates/clientcore" }
 

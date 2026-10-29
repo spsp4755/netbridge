@@ -197,7 +197,7 @@ impl Core {
         // the sending network's server scans with this route's PII thresholds
         let policy = Policy { pii_rules: route.effective_pii(&global.pii_rules), ..global };
         let scan: ScanResult = if self.is_local(&c.side) {
-            scan_path(&t.file_name, &self.files.path(id), &policy).map_err(|_| ApiError::bad("올린 파일이 없습니다"))?
+            scan_path(&t.file_name, &self.files.path(id), &policy, &self.scanners).map_err(|_| ApiError::bad("올린 파일이 없습니다"))?
         } else {
             self.peer(&c.side)?.scan(id, &t.file_name, &policy).await?
         };
@@ -206,7 +206,13 @@ impl Core {
             return Err(ApiError::new(ErrorCode::Conflict, "파일이 올바르게 올라가지 않았습니다. 다시 보내세요"));
         }
         let pii = serde_json::to_string(&scan.hits).map_err(ApiError::internal)?;
-        self.db.with(|db| db.execute("UPDATE transfers SET pii=?2, unscannable=?3 WHERE id=?1", params![id, pii, scan.unscannable]))?;
+        let threats = serde_json::to_string(&scan.threats).map_err(ApiError::internal)?;
+        self.db.with(|db| db.execute("UPDATE transfers SET pii=?2, unscannable=?3, threats=?4 WHERE id=?1", params![id, pii, scan.unscannable, threats]))?;
+        if let Some((size, sha)) = &scan.cdr {
+            // the receiver gets the rebuilt file; its hash is what delivery and download check
+            self.db.with(|db| db.execute("UPDATE transfers SET size=?2, sha256=?3 WHERE id=?1", params![id, *size as i64, sha]))?;
+            self.audit(Some((c.user_id, &c.username)), "transfer", Some(&c.ip), &format!("#{id} 무해화(CDR) 처리됨"));
+        }
         self.audit(Some((c.user_id, &c.username)), "transfer", Some(&c.ip), &format!("#{id} {} {} ({}B)", t.route.label(&self.topo), t.file_name, t.size));
         self.route_transfer(id, &scan).await?;
         self.transfer_info(id)

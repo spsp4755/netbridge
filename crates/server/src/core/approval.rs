@@ -48,12 +48,18 @@ impl Core {
         let route = self.route_policy(&t.route)?;
         let rules = route.effective_pii(&global.pii_rules);
         let action = netbridge_pii::decide(&scan.hits, scan.unscannable, &rules, route.unscannable());
-        if action == Some(PiiAction::Block) {
-            let mut items: Vec<String> = scan.hits.iter().map(|h| format!("{} {}건", h.name, h.count)).collect();
-            if scan.unscannable {
-                items.push("내용 검사 불가".into());
-            }
-            let reason = format!("개인정보 탐지로 차단: {}", items.join(", "));
+        let threat = scan.threats.iter().map(|f| route.threat_action(f.kind)).max();
+        let blocked_by: Vec<String> = scan.threats.iter().filter(|f| route.threat_action(f.kind) == PiiAction::Block).map(|f| format!("{}({})", f.kind.label(), f.detail)).collect();
+        if action == Some(PiiAction::Block) || threat == Some(PiiAction::Block) {
+            let reason = if !blocked_by.is_empty() {
+                format!("위협 탐지로 차단: {}", blocked_by.join(", "))
+            } else {
+                let mut items: Vec<String> = scan.hits.iter().map(|h| format!("{} {}건", h.name, h.count)).collect();
+                if scan.unscannable {
+                    items.push("내용 검사 불가".into());
+                }
+                format!("개인정보 탐지로 차단: {}", items.join(", "))
+            };
             self.db.with(|c| c.execute("UPDATE transfers SET state='Blocked', block_reason=?2 WHERE id=?1", params![id, reason]))?;
             self.remove_at(&t.route.from, id).await;
             self.audit(Some((owner, &t.owner)), "transfer_blocked", Some(&t.sender_ip), &format!("#{id} {reason}"));
@@ -62,7 +68,7 @@ impl Core {
         }
         let (approver, dept, restricted): (i64, Option<i64>, bool) =
             self.db.with(|c| c.query_row("SELECT approver_id, dept_id, post_restricted FROM users WHERE id=?1", [owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
-        let mode = if action == Some(PiiAction::ForcePre) || restricted {
+        let mode = if action == Some(PiiAction::ForcePre) || threat == Some(PiiAction::ForcePre) || restricted {
             ApprovalMode::Pre
         } else {
             pick_mode(&route.approval_rules, t.size, &ext_of(&t.file_name), dept)

@@ -55,6 +55,8 @@ pub struct ServerConfig {
     pub links: Vec<HubLink>,
     /// Node only.
     pub neighbors: Vec<Neighbor>,
+    /// Antivirus / CDR tools for files stored on this server.
+    pub scanners: Vec<netbridge_scan::ExternalScanner>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +83,8 @@ struct Raw {
     routes: Vec<RoutePair>,
     #[serde(default)]
     neighbors: Vec<Neighbor>,
+    #[serde(default)]
+    scanners: Vec<netbridge_scan::ExternalScanner>,
 }
 
 #[derive(Deserialize, Default)]
@@ -133,6 +137,7 @@ impl ServerConfig {
             topology: None,
             links: r.links,
             neighbors: r.neighbors,
+            scanners: r.scanners,
         };
         match (r.side.as_deref(), r.role.as_deref()) {
             // 0.1–0.3 two-network files
