@@ -1,0 +1,5 @@
+# Cross-compiles NetBridge for Windows (x86_64-pc-windows-gnu) and builds the NSIS installer.
+FROM rust:1.90-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends mingw-w64 nsis zip && rm -rf /var/lib/apt/lists/*
+RUN rustup target add x86_64-pc-windows-gnu
+WORKDIR /src

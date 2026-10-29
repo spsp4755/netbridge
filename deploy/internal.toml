@@ -1,0 +1,14 @@
+# 내부 연계서버 (업무망). 업무망 PC의 NetBridge 앱이 이 서버에 접속합니다.
+# 계정·정책·결재·이력은 모두 이 서버의 data/netbridge.db 에 있습니다.
+side = "internal"
+listen = "0.0.0.0:8443"
+data_dir = "data"
+tls_cert = "certs/internal.pem"
+tls_key = "certs/internal.key"
+ca_cert = "certs/ca.pem"
+
+[link]
+# 외부 연계서버의 연계 구간 주소. 내부 서버가 먼저 접속하며, 외부에서 내부로 들어오는 연결은 없습니다.
+external_url = "https://192.168.100.1:9443"
+client_cert = "certs/link-client.pem"
+client_key = "certs/link-client.key"

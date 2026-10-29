@@ -1,0 +1,12 @@
+# 외부 연계서버 (인터넷망). 인터넷망 PC의 NetBridge 앱이 이 서버에 접속합니다.
+side = "external"
+# 인터넷망 PC들이 접속할 주소
+listen = "0.0.0.0:8443"
+data_dir = "data"
+tls_cert = "certs/external.pem"
+tls_key = "certs/external.key"
+ca_cert = "certs/ca.pem"
+
+[link]
+# 내부 연계서버만 접속하는 연계 구간 주소 (연계 전용 NIC의 IP로 제한하세요)
+listen = "192.168.100.1:9443"

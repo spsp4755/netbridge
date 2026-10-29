@@ -1,0 +1,30 @@
+[package]
+name = "netbridge-client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "netbridge"
+path = "src/main.rs"
+
+[dependencies]
+netbridge-proto.workspace = true
+netbridge-pii.workspace = true
+netbridge-clientcore.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time"] }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+egui_extras = { version = "0.31", features = ["datepicker"] }
+global-hotkey = "0.6"
+arboard = { version = "3", default-features = false }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+open = "5"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.19"
+
+[build-dependencies]
+embed-resource = "3"
