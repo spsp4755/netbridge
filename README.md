@@ -63,5 +63,4 @@ cargo run -p netbridge-server -- run --config dev/internal.toml
 ## 라이선스
 
 - NetBridge: MIT (`LICENSE`)
-
 - 한글 글꼴: 나눔고딕 (SIL Open Font License, `assets/fonts/OFL.txt`)
