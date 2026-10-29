@@ -22,8 +22,9 @@ pub struct LockState {
 }
 
 /// Brand panel on the left, form card on the right: used by the setup and login screens.
-pub fn split_screen(ui: &mut egui::Ui, logo: &egui::TextureHandle, side: Option<Side>, form: impl FnOnce(&mut egui::Ui)) {
-    let accent = side.map(side_color).unwrap_or(ACCENT);
+/// `side`: this PC's network name and colour, once the server has answered.
+pub fn split_screen(ui: &mut egui::Ui, logo: &egui::TextureHandle, side: Option<(String, Color32)>, form: impl FnOnce(&mut egui::Ui)) {
+    let accent = side.as_ref().map(|s| s.1).unwrap_or(ACCENT);
     let size = egui::vec2(860.0_f32.min(ui.available_width() - 40.0), 480.0);
     ui.add_space(((ui.available_height() - size.y) / 2.0).max(10.0));
     ui.vertical_centered(|ui| {
@@ -46,8 +47,8 @@ pub fn split_screen(ui: &mut egui::Ui, logo: &egui::TextureHandle, side: Option<
                         }
                         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                             ui.label(RichText::new(format!("버전 {}", env!("CARGO_PKG_VERSION"))).small().color(Color32::from_rgb(130, 146, 172)));
-                            if let Some(side) = side {
-                                pill(ui, &format!("●  {} PC", side.label()), Color32::WHITE, accent);
+                            if let Some((name, _)) = &side {
+                                pill(ui, &format!("●  {name} PC"), Color32::WHITE, accent);
                             }
                         });
                     });
@@ -63,11 +64,11 @@ pub fn split_screen(ui: &mut egui::Ui, logo: &egui::TextureHandle, side: Option<
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let logo = app.logo.clone();
-    let side = app.side;
-    split_screen(ui, &logo, side, |ui| {
+    let side = app.side.as_ref().map(|s| (app.name(s), app.net_color(s)));
+    split_screen(ui, &logo, side.clone(), |ui| {
         ui.label(bold("로그인", 24.0).color(TEXT));
-        if let Some(side) = side {
-            ui.label(muted(format!("{}에서 로그인하면 {} PC도 함께 로그인됩니다.", side.label(), side.other().label())));
+        if let Some((name, _)) = &side {
+            ui.label(muted(format!("{name}에서 로그인하면 사용할 수 있는 다른 망 PC도 함께 로그인됩니다.")));
         }
         ui.add_space(20.0);
         let field_w = ui.available_width();

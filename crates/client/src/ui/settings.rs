@@ -97,7 +97,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
 fn hotkey_section(app: &mut App, ui: &mut egui::Ui) {
     section_title(ui, "클립보드 단축키");
-    ui.label(muted(format!("텍스트를 복사한 뒤 단축키를 누르면 {} PC의 클립보드로 보냅니다.", app.side.map(|s| s.other().label()).unwrap_or("반대편 망"))));
+    let targets: Vec<NetId> = app.me.as_ref().map(|m| m.routes.iter().filter(|r| r.clipboard).map(|r| r.route.to.clone()).collect()).unwrap_or_default();
+    let current = app.clipboard_target();
+    match &current {
+        Some(t) => ui.label(muted(format!("텍스트를 복사한 뒤 단축키를 누르면 {} PC의 클립보드로 보냅니다.", app.name(t)))),
+        None => ui.label(RichText::new("클립보드를 보낼 수 있는 망이 없습니다 (통로 정책에서 클립보드가 꺼져 있음).").color(WARN)),
+    };
+    if targets.len() > 1 {
+        ui.horizontal(|ui| {
+            ui.label(muted("보낼 망"));
+            for t in &targets {
+                if ui.selectable_label(current.as_ref() == Some(t), app.name(t)).clicked() {
+                    app.cfg.clipboard_to = Some(t.clone());
+                    save(app);
+                    app.sync_clipboard_target();
+                }
+            }
+        });
+    }
     ui.horizontal(|ui| {
         egui::Frame::new().fill(NEUTRAL_SOFT).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
             ui.label(bold(if app.settings.capturing { "…" } else { &app.cfg.hotkey }, 16.0));

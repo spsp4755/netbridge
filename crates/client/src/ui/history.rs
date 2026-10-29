@@ -20,6 +20,11 @@ pub fn refresh(app: &mut App) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    let topo = app.topo.clone();
+    let route_label = move |r: &Route| match &topo {
+        Some(t) => r.label(t),
+        None => format!("{} → {}", r.from, r.to),
+    };
     page_header(ui, "보낸 파일", Some("내가 보낸 파일의 진행 상태, 결재 결과와 송수신 IP입니다. 파일 이름에 마우스를 올리면 사유와 해시가 보입니다."));
     ui.horizontal(|ui| {
         let total = app.outgoing.items.len();
@@ -81,12 +86,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 ui.label(fmt_ts(t.created_at));
                             });
                             row.col(|ui| {
-                                ui.label(t.direction.label());
+                                ui.label(route_label(&t.route));
                             });
                             row.col(|ui| {
                                 let mut tip = format!("사유: {}\nSHA-256: {}", t.reason, t.sha256);
                                 if let Some(c) = t.approval.as_ref().and_then(|a| a.comment.clone()) {
                                     tip.push_str(&format!("\n결재 의견: {c}"));
+                                }
+                                for f in &t.threats {
+                                    tip.push_str(&format!("\n검사: {} — {}", f.kind.label(), f.detail));
                                 }
                                 if let Some(b) = &t.block_reason {
                                     tip.push_str(&format!("\n{b}"));

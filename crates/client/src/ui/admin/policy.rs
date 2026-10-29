@@ -54,7 +54,7 @@ pub fn policy(app: &mut App, ui: &mut egui::Ui) {
         ui.label("로그인 실패 잠금");
         ui.add(egui::DragValue::new(&mut p.login_fail_lock).range(1..=20).suffix(" 회"));
         ui.end_row();
-        ui.label("차단 확장자");
+        ui.label("차단 확장자 (통로 기본값)");
         ui.add(egui::TextEdit::singleline(&mut app.admin.blocked_text).desired_width(360.0));
         ui.end_row();
         ui.label("허용 확장자 (비우면 차단 목록 외 전부 허용)");

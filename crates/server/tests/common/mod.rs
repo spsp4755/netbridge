@@ -70,7 +70,11 @@ impl Peer for FakePeer {
 
 /// The other network of the legacy two-network layout.
 pub fn other(side: &NetId) -> NetId {
-    if *side == NetId::internal() { NetId::external() } else { NetId::internal() }
+    if *side == NetId::internal() {
+        NetId::external()
+    } else {
+        NetId::internal()
+    }
 }
 
 pub struct Kit {
@@ -181,10 +185,8 @@ pub fn ctx(side: Side, token: Option<&str>) -> CallCtx {
 
 impl Kit {
     pub fn user(&self, username: &str, role: Role, approver: Option<i64>) -> i64 {
-        let id = self
-            .core
-            .create_user(&UserInput { id: None, username: username.into(), name: format!("{username} 님"), dept_id: None, role, approver_id: approver, password: Some(PW.into()), networks: vec![] })
-            .unwrap();
+        let id =
+            self.core.create_user(&UserInput { id: None, username: username.into(), name: format!("{username} 님"), dept_id: None, role, approver_id: approver, password: Some(PW.into()), networks: vec![] }).unwrap();
         self.core.clear_must_change(id).unwrap();
         id
     }
@@ -225,7 +227,13 @@ impl Kit {
     }
 
     pub fn dept(&self, name: &str) -> i64 {
-        self.core.db.with(|c| { c.execute("INSERT INTO depts(name) VALUES(?1)", [name])?; Ok(c.last_insert_rowid()) }).unwrap()
+        self.core
+            .db
+            .with(|c| {
+                c.execute("INSERT INTO depts(name) VALUES(?1)", [name])?;
+                Ok(c.last_insert_rowid())
+            })
+            .unwrap()
     }
 }
 

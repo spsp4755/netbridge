@@ -1,6 +1,7 @@
 mod audit;
 mod limits;
 mod policy;
+mod routes;
 mod users;
 
 use crate::app::App;
@@ -16,7 +17,7 @@ pub enum Tab {
     Users,
     Depts,
     Limits,
-    Rules,
+    Routes,
     Policy,
     Pii,
     Audit,
@@ -31,8 +32,13 @@ pub struct State {
     pub blocked_text: String,
     pub allowed_text: String,
     pub overrides: Vec<LimitOverride>,
-    pub rules: Vec<ApprovalRule>,
+    pub routes: Vec<RoutePolicy>,
+    pub route_sel: usize,
+    /// Route being edited (saved with SetRoutePolicy).
+    pub draft: Option<RoutePolicy>,
     pub rule_exts: Vec<String>,
+    pub r_blocked: String,
+    pub r_allowed: String,
     pub audit: Vec<AuditRow>,
     pub sessions: Vec<SessionInfo>,
     pub user_form: Option<UserInput>,
@@ -60,8 +66,12 @@ impl Default for State {
             blocked_text: String::new(),
             allowed_text: String::new(),
             overrides: vec![],
-            rules: vec![],
+            routes: vec![],
+            route_sel: 0,
+            draft: None,
             rule_exts: vec![],
+            r_blocked: String::new(),
+            r_allowed: String::new(),
             audit: vec![],
             sessions: vec![],
             user_form: None,
@@ -101,10 +111,12 @@ pub fn refresh(app: &mut App) {
             a.admin.overrides = v;
         }
     });
-    adm(app, AdminRequest::ListApprovalRules, |a, r| {
-        if let ApiResponse::ApprovalRules(v) = r {
-            a.admin.rule_exts = v.iter().map(|r| crate::ui::exts_to_text(&r.exts)).collect();
-            a.admin.rules = v;
+    adm(app, AdminRequest::ListRoutePolicies, |a, r| {
+        if let ApiResponse::RoutePolicies(v) = r {
+            a.admin.routes = v;
+            if a.admin.draft.is_none() && !a.admin.routes.is_empty() {
+                routes::select(a, a.admin.route_sel.min(a.admin.routes.len() - 1));
+            }
         }
     });
     audit::refresh_sessions(app);
@@ -152,7 +164,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         (Tab::Users, "사용자"),
         (Tab::Depts, "부서"),
         (Tab::Limits, "용량 한도"),
-        (Tab::Rules, "결재 규칙"),
+        (Tab::Routes, "통로 정책"),
         (Tab::Policy, "보안정책"),
         (Tab::Pii, "개인정보 탐지"),
         (Tab::Audit, "이력 조회"),
@@ -184,7 +196,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         Tab::Users => users::users(app, ui),
         Tab::Depts => users::depts(app, ui),
         Tab::Limits => limits::limits(app, ui),
-        Tab::Rules => limits::rules(app, ui),
+        Tab::Routes => routes::routes(app, ui),
         Tab::Policy => policy::policy(app, ui),
         Tab::Pii => policy::pii(app, ui),
         Tab::Audit => audit::audit(app, ui),
@@ -202,7 +214,7 @@ fn overview(app: &mut App, ui: &mut egui::Ui) {
         stat_tile(&mut c[0], "사용자", a.users.len().to_string(), &format!("관리자 {admins} · 잠김 {locked}"), TEXT);
         stat_tile(&mut c[1], "로그인 세션", a.sessions.len().to_string(), &format!("접속 중 {online} · 양쪽 망 {both}"), SUCCESS);
         stat_tile(&mut c[2], "부서", a.depts.len().to_string(), "결재선 기준 조직", TEXT);
-        stat_tile(&mut c[3], "결재 규칙", a.rules.len().to_string(), "확장자·방향별 결재 방식", ACCENT);
+        stat_tile(&mut c[3], "통로", a.routes.len().to_string(), &format!("사용 {} · 방향별 정책", a.routes.iter().filter(|r| r.enabled).count()), ACCENT);
     });
     ui.add_space(12.0);
     let Some(p) = a.policy.clone() else {

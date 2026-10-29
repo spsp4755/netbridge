@@ -67,8 +67,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(muted("보낸 사람"));
                 ui.label(format!("{}  ({}, {})", t.owner, t.sender_ip, fmt_ts(t.created_at)));
                 ui.end_row();
-                ui.label(muted("방향"));
-                ui.label(t.direction.label());
+                ui.label(muted("통로"));
+                ui.label(app.route_label(&t.route));
                 ui.end_row();
                 ui.label(muted("파일"));
                 ui.label(format!("{}  ({})", t.file_name, fmt_bytes(t.size)));
@@ -79,6 +79,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(muted("사유"));
                 ui.label(&t.reason);
                 ui.end_row();
+                if !t.threats.is_empty() {
+                    ui.label(muted("파일 검사"));
+                    let v: Vec<String> = t.threats.iter().map(|f| format!("{}: {}", f.kind.label(), f.detail)).collect();
+                    ui.label(RichText::new(v.join("\n")).color(DANGER));
+                    ui.end_row();
+                }
                 ui.label(muted("개인정보"));
                 let s = pii_summary(&t.pii, t.unscannable);
                 ui.label(if s == "-" { RichText::new("탐지 없음") } else { RichText::new(s).color(Color32::from_rgb(190, 40, 40)) });
@@ -98,14 +104,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
                 // pre-approval content only exists on the sending network
-                let here = Some(t.direction.from_side()) == app.side;
+                let here = Some(&t.route.from) == app.side.as_ref();
                 if it.approval.mode == ApprovalMode::Pre {
                     if here {
                         if ui.add(secondary("미리 보기")).clicked() {
                             preview = Some(t.clone());
                         }
                     } else {
-                        ui.label(RichText::new(format!("미리 보기는 {} PC에서 할 수 있습니다", t.direction.from_side().label())).small());
+                        ui.label(RichText::new(format!("미리 보기는 {} PC에서 할 수 있습니다", app.name(&t.route.from))).small());
                     }
                 }
                 if busy {

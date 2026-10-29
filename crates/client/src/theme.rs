@@ -1,7 +1,6 @@
 //! Look and feel: palette, global style and the small set of widgets every screen shares.
 use crate::fonts;
 use eframe::egui::{self, Color32, CornerRadius, FontId, Margin, RichText, Shadow, Stroke, TextStyle};
-use netbridge_proto::Side;
 
 pub const ACCENT: Color32 = Color32::from_rgb(31, 94, 219);
 pub const ACCENT_SOFT: Color32 = Color32::from_rgb(232, 240, 253);
@@ -21,12 +20,11 @@ pub const NAV_BG: Color32 = Color32::from_rgb(16, 30, 54);
 pub const NAV_TEXT: Color32 = Color32::from_rgb(196, 207, 225);
 pub const NAV_SELECTED: Color32 = Color32::from_rgb(35, 61, 104);
 
-/// Each network has its own colour so users always see which side they are on.
-pub fn side_color(side: Side) -> Color32 {
-    match side {
-        Side::External => Color32::from_rgb(14, 150, 130),
-        Side::Internal => Color32::from_rgb(64, 120, 235),
-    }
+/// Each network has its own colour (by its position in the server's network list) so users always see which side they are on.
+pub fn net_color(index: usize) -> Color32 {
+    const PALETTE: [Color32; 6] =
+        [Color32::from_rgb(14, 150, 130), Color32::from_rgb(64, 120, 235), Color32::from_rgb(196, 110, 20), Color32::from_rgb(140, 80, 200), Color32::from_rgb(200, 60, 110), Color32::from_rgb(90, 130, 60)];
+    PALETTE[index % PALETTE.len()]
 }
 
 pub fn apply(ctx: &egui::Context) {

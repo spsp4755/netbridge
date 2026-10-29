@@ -36,7 +36,8 @@ pub fn refresh(app: &mut App) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let from = app.side.map(|s| s.other().label()).unwrap_or("반대편 망");
+    let from = "다른 망";
+    let topo = app.topo.clone();
     let sub = if app.cfg.auto_download {
         format!("{from}에서 보낸 파일입니다. 프로그램이 실행 중이면 도착하는 대로 저장 폴더에 자동으로 저장됩니다.")
     } else {
@@ -95,7 +96,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .column(Column::auto().at_least(80.0))
             .column(Column::auto().at_least(70.0))
             .header(28.0, |mut h| {
-                for c in ["보낸 시각", "파일", "크기", "송신 IP", "결재", "상태", ""] {
+                for c in ["보낸 시각", "파일", "크기", "보낸 망 · IP", "결재", "상태", ""] {
                     h.col(|ui| {
                         ui.label(muted(c));
                     });
@@ -114,7 +115,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             ui.label(fmt_bytes(t.size));
                         });
                         row.col(|ui| {
-                            ui.label(&t.sender_ip);
+                            let net = topo.as_ref().map(|tp| tp.name(&t.route.from)).unwrap_or_else(|| t.route.from.0.clone());
+                            ui.label(format!("{net} · {}", t.sender_ip));
                         });
                         row.col(|ui| {
                             ui.label(approval_text(&t.approval));
@@ -183,7 +185,8 @@ mod tests {
         TransferInfo {
             id,
             owner: "kim".into(),
-            direction: Direction::ToExternal,
+            route: Route::new(NetId::internal(), NetId::external()),
+            threats: vec![],
             file_name: "a.txt".into(),
             size: 1,
             sha256: "x".into(),

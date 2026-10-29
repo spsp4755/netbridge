@@ -50,6 +50,10 @@ pub struct App {
     pub net: Option<Arc<Net>>,
     net_slot: Arc<Mutex<Option<Arc<Net>>>>,
     pub side: Option<Side>,
+    /// Networks and links, from the server's Hello.
+    pub topo: Option<Topology>,
+    /// Where the clipboard hotkey sends; read by the hotkey thread while the window is hidden.
+    clip_to: Arc<Mutex<Option<NetId>>>,
     pub me: Option<Me>,
     pub phase: Phase,
     pub screen: Screen,
@@ -101,6 +105,8 @@ impl App {
             net: None,
             net_slot: Arc::new(Mutex::new(None)),
             side: None,
+            topo: None,
+            clip_to: Arc::new(Mutex::new(None)),
             me: None,
             phase: Phase::Setup,
             screen: Screen::Send,
@@ -208,10 +214,11 @@ impl App {
                     self.hotkey_error = Some(format!("{} ({})", e, self.cfg.hotkey));
                 }
                 let slot = self.net_slot.clone();
+                let clip_to = self.clip_to.clone();
                 let rt = self.rt.clone();
                 let tx = self.tx.clone();
                 let ctx = self.ctx.clone();
-                h.on_press(move || send_clipboard(&slot, &rt, &tx, &ctx));
+                h.on_press(move || send_clipboard(&slot, &clip_to, &rt, &tx, &ctx));
                 self.hotkeys = Some(h);
             }
             Err(e) => self.hotkey_error = Some(e),
@@ -235,9 +242,10 @@ impl App {
             Ok(h) => {
                 a.first_run = false;
                 a.retry_at = None;
-                a.side = Some(h.side);
+                a.side = Some(h.side.clone());
+                a.topo = Some(h.topology.clone());
                 a.phase = Phase::Login;
-                a.ctx.send_viewport_cmd(ViewportCommand::Title(format!("NetBridge 자료전송 — {}", h.side.label())));
+                a.ctx.send_viewport_cmd(ViewportCommand::Title(format!("NetBridge 자료전송 — {}", h.topology.name(&h.side))));
                 if let Some(user) = a.cfg.last_user.clone() {
                     a.login.username = user.clone();
                     if let Some(key) = secret::load_device_key(&config_dir(), &secret::slot(&a.cfg.server_url, &user)) {
@@ -352,7 +360,7 @@ impl App {
                 Event::SessionStarted { me, .. } => {
                     if self.phase != Phase::Main {
                         self.enter_main(me);
-                        self.toast(format!("{}에서 로그인되어 자동으로 로그인했습니다", self.side.map(|s| s.other().label()).unwrap_or("반대편 망")));
+                        self.toast("다른 망에서 로그인되어 자동으로 로그인했습니다");
                     }
                 }
                 Event::SessionEnded { reason } => {
@@ -362,7 +370,7 @@ impl App {
                 }
                 Event::Clipboard { text, from_ip } => self.toast_info(format!("클립보드를 받았습니다 ({}자, {from_ip})", text.chars().count())),
                 Event::TransferUpdated { transfer } => {
-                    let incoming = Some(transfer.direction.from_side()) != self.side;
+                    let incoming = Some(&transfer.route.to) == self.side.as_ref();
                     if incoming && transfer.state == TransferState::Available {
                         self.toast_info(format!("받을 파일이 도착했습니다: {}", transfer.file_name));
                     } else if !incoming && matches!(transfer.state, TransferState::Rejected | TransferState::Blocked) {
@@ -381,6 +389,15 @@ impl App {
                     if let Some(me) = &mut self.me {
                         me.policy = policy;
                     }
+                    // route policies may have changed too: which networks, limits, clipboard
+                    self.api(ApiRequest::Me, |a, r| {
+                        if let (ApiResponse::Me(me), Some(cur)) = (r, a.me.as_mut()) {
+                            cur.routes = me.routes;
+                            cur.networks = me.networks;
+                            a.sync_clipboard_target();
+                            a.refresh_usage();
+                        }
+                    });
                 }
             },
         }
@@ -393,6 +410,7 @@ impl App {
         self.screen = Screen::Send;
         self.last_input = Instant::now();
         self.locked = false;
+        self.sync_clipboard_target();
         self.refresh_usage();
         // files that arrived while the app was closed are saved now when auto-download is on
         ui::inbox::refresh(self);
@@ -421,12 +439,61 @@ impl App {
         self.enter_main(me);
     }
 
+    /// Today's usage of the route to the network picked on the send screen.
     pub fn refresh_usage(&self) {
-        self.api(ApiRequest::Usage, |a, r| {
+        let Some(to) = self.send_target() else { return };
+        self.api(ApiRequest::Usage { to: to.clone() }, move |a, r| {
             if let ApiResponse::Usage(u) = r {
-                a.usage = Some(u);
+                if a.send_target().as_ref() == Some(&to) {
+                    a.usage = Some(u);
+                }
             }
         });
+    }
+
+    pub fn name(&self, n: &NetId) -> String {
+        self.topo.as_ref().map(|t| t.name(n)).unwrap_or_else(|| n.0.clone())
+    }
+
+    pub fn route_label(&self, r: &Route) -> String {
+        format!("{} → {}", self.name(&r.from), self.name(&r.to))
+    }
+
+    pub fn side_name(&self) -> String {
+        self.side.as_ref().map(|s| self.name(s)).unwrap_or_default()
+    }
+
+    pub fn net_color(&self, n: &NetId) -> Color32 {
+        theme::net_color(self.topo.as_ref().map(|t| t.index(n)).unwrap_or(0))
+    }
+
+    /// Networks this user can send to from here (enabled routes).
+    pub fn targets(&self) -> Vec<NetId> {
+        match (&self.me, &self.topo, &self.side) {
+            (Some(me), _, _) => me.routes.iter().map(|r| r.route.to.clone()).collect(),
+            (None, Some(t), Some(s)) => t.targets(s),
+            _ => vec![],
+        }
+    }
+
+    pub fn route_to(&self, to: &NetId) -> Option<&RoutePolicy> {
+        self.me.as_ref().and_then(|m| m.routes.iter().find(|r| r.route.to == *to))
+    }
+
+    /// The send screen's target, or the only/first one.
+    pub fn send_target(&self) -> Option<NetId> {
+        let t = self.targets();
+        self.send.to.clone().filter(|x| t.contains(x)).or_else(|| t.first().cloned())
+    }
+
+    /// The clipboard target: the PC's choice if still allowed, else the first route that allows clipboard.
+    pub fn clipboard_target(&self) -> Option<NetId> {
+        let ok: Vec<NetId> = self.me.as_ref().map(|m| m.routes.iter().filter(|r| r.clipboard).map(|r| r.route.to.clone()).collect()).unwrap_or_default();
+        self.cfg.clipboard_to.clone().filter(|x| ok.contains(x)).or_else(|| ok.first().cloned())
+    }
+
+    pub fn sync_clipboard_target(&self) {
+        *self.clip_to.lock().unwrap() = self.clipboard_target();
     }
 
     pub fn logout(&mut self) {
@@ -442,6 +509,7 @@ impl App {
         }
         self.me = None;
         self.usage = None;
+        *self.clip_to.lock().unwrap() = None;
         self.phase = Phase::Login;
         self.locked = false;
         self.send = Default::default();
@@ -455,7 +523,7 @@ impl App {
     }
 
     pub fn is_admin_console(&self) -> bool {
-        self.side == Some(Side::Internal) && self.me.as_ref().is_some_and(|m| m.role == Role::Admin)
+        self.topo.as_ref().is_some_and(|t| Some(&t.hub) == self.side.as_ref()) && self.me.as_ref().is_some_and(|m| m.role == Role::Admin)
     }
 
     fn track_idle(&mut self, ctx: &egui::Context) {
@@ -494,9 +562,9 @@ impl App {
                 ui.label(RichText::new(v).small());
             };
             // connection details are for administrators only
-            if let (Some(side), Some(me)) = (self.side, &self.me) {
+            if let (Some(side), Some(me)) = (&self.side, &self.me) {
                 if me.role == Role::Admin {
-                    item(ui, &format!("{} 서버", side.label()), self.cfg.server_url.clone());
+                    item(ui, &format!("{} 서버", self.name(side)), self.cfg.server_url.clone());
                 }
             }
             if let Some(u) = &self.usage {
@@ -546,7 +614,7 @@ impl App {
     }
 
     fn nav(&mut self, ui: &mut egui::Ui) {
-        let accent = self.side.map(theme::side_color).unwrap_or(theme::ACCENT);
+        let accent = self.side.as_ref().map(|s| self.net_color(s)).unwrap_or(theme::ACCENT);
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
@@ -558,10 +626,10 @@ impl App {
             });
         });
         ui.add_space(14.0);
-        if let Some(side) = self.side {
+        if let Some(side) = self.side.clone() {
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                theme::pill(ui, &format!("●  {} PC", side.label()), Color32::WHITE, accent);
+                theme::pill(ui, &format!("●  {} PC", self.name(&side)), Color32::WHITE, accent);
             });
         }
         ui.add_space(16.0);
@@ -732,13 +800,17 @@ impl App {
 }
 
 /// Global shortcut handler: reads the clipboard and sends it to the other network.
-fn send_clipboard(slot: &Arc<Mutex<Option<Arc<Net>>>>, rt: &tokio::runtime::Handle, tx: &Sender<Job>, ctx: &egui::Context) {
+fn send_clipboard(slot: &Arc<Mutex<Option<Arc<Net>>>>, clip_to: &Arc<Mutex<Option<NetId>>>, rt: &tokio::runtime::Handle, tx: &Sender<Job>, ctx: &egui::Context) {
     let notify = |job: Job| {
         let _ = tx.send(job);
         ctx.request_repaint();
     };
     let Some(net) = slot.lock().unwrap().clone().filter(|n| n.token().is_some()) else {
         notify(Box::new(|a: &mut App| a.toast_err("로그인한 뒤에 클립보드를 보낼 수 있습니다")));
+        return;
+    };
+    let Some(to) = clip_to.lock().unwrap().clone() else {
+        notify(Box::new(|a: &mut App| a.toast_err("클립보드를 보낼 수 있는 망이 없습니다 (통로 정책에서 클립보드가 꺼져 있음)")));
         return;
     };
     let text = match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
@@ -752,9 +824,9 @@ fn send_clipboard(slot: &Arc<Mutex<Option<Arc<Net>>>>, rt: &tokio::runtime::Hand
     let ctx = ctx.clone();
     let n = text.chars().count();
     rt.spawn(async move {
-        let r = net.call(ApiRequest::Clipboard { text }).await;
+        let r = net.call(ApiRequest::Clipboard { to: to.clone(), text }).await;
         let _ = tx.send(Box::new(move |a: &mut App| match r {
-            Ok(_) => a.toast(format!("클립보드를 {}(으)로 보냈습니다 ({n}자)", a.side.map(|s| s.other().label()).unwrap_or("반대편 망"))),
+            Ok(_) => a.toast(format!("클립보드를 {}(으)로 보냈습니다 ({n}자)", a.name(&to))),
             Err(e) => a.api_error(e),
         }));
         ctx.request_repaint();

@@ -157,7 +157,7 @@ pub fn sessions(app: &mut App, ui: &mut egui::Ui) {
             ui.label(format!("{} ({})", s.name, s.username));
             ui.label(fmt_ts(s.created_at));
             ui.label(fmt_ts(s.last_seen));
-            let on: Vec<&str> = s.online.iter().map(|x| x.label()).collect();
+            let on: Vec<String> = s.online.iter().map(|x| app.name(x)).collect();
             ui.label(if on.is_empty() { "없음".to_string() } else { on.join(", ") });
             if ui.small_button("강제 종료").clicked() {
                 kill = Some(s.id);

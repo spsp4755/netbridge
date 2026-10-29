@@ -17,6 +17,8 @@ pub struct State {
     pub results: Vec<(String, Result<TransferInfo, String>)>,
     /// (transfer id, file name, reason being typed) for a PII file waiting for its reason
     pub reason_for: Option<(i64, String, String)>,
+    /// Receiving network picked by the user (None = the first allowed one).
+    pub to: Option<NetId>,
 }
 
 fn add(app: &mut App, p: PathBuf) {
@@ -34,11 +36,10 @@ fn add(app: &mut App, p: PathBuf) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let (from, to) = match app.side {
-        Some(s) => (s.label(), s.other().label()),
-        None => ("이 망", "반대편 망"),
-    };
-    page_header(ui, "파일 보내기", Some(&format!("{from}에서 {to}(으)로 파일을 보냅니다. 개인정보가 탐지되면 결재를 거쳐 전달됩니다.")));
+    let from = app.side_name();
+    page_header(ui, "파일 보내기", Some(&format!("{from}에서 다른 망으로 파일을 보냅니다. 개인정보나 위험한 내용이 탐지되면 결재를 거쳐 전달됩니다.")));
+    target_picker(app, ui);
+    ui.add_space(10.0);
     let dropped: Vec<PathBuf> = ui.ctx().input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
     if !app.send.busy {
         for p in dropped {
@@ -180,6 +181,38 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// "받는 망" chips: one per network this PC may send to, in that network's colour.
+fn target_picker(app: &mut App, ui: &mut egui::Ui) {
+    let targets = app.targets();
+    let current = app.send_target();
+    card(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(bold("받는 망", 15.0).color(TEXT));
+            ui.add_space(8.0);
+            if targets.is_empty() {
+                ui.label(RichText::new("보낼 수 있는 망이 없습니다. 관리자에게 통로 사용 권한을 요청하세요.").color(DANGER));
+            }
+            for t in &targets {
+                let on = current.as_ref() == Some(t);
+                let c = app.net_color(t);
+                let text = format!("{}  {}", if on { "●" } else { "○" }, app.name(t));
+                let b =
+                    egui::Button::new(bold(text, 14.0).color(if on { Color32::WHITE } else { c })).fill(if on { c } else { CARD }).stroke(egui::Stroke::new(1.5_f32, c)).corner_radius(16).min_size(egui::vec2(0.0, 32.0));
+                if ui.add_enabled(!app.send.busy, b).clicked() && !on {
+                    app.send.to = Some(t.clone());
+                    app.usage = None;
+                    app.refresh_usage();
+                }
+            }
+            if let Some(r) = current.as_ref().and_then(|t| app.route_to(t)) {
+                if r.approval_rules.iter().any(|x| x.mode == ApprovalMode::Post) {
+                    ui.label(muted("이 통로는 조건에 따라 사후결재로 바로 전달될 수 있습니다"));
+                }
+            }
+        });
+    });
+}
+
 /// Today's allowance: limit, used, left, per-file maximum, and whether the selected files fit.
 fn usage_card(app: &App, ui: &mut egui::Ui) {
     let Some(u) = &app.usage else { return };
@@ -292,6 +325,10 @@ pub fn reason_modal(app: &mut App, ctx: &egui::Context) {
 
 fn start(app: &mut App) {
     let Some(net) = app.net.clone() else { return };
+    let Some(to) = app.send_target() else {
+        app.toast_err("보낼 수 있는 망이 없습니다");
+        return;
+    };
     app.send.busy = true;
     app.send.results.clear();
     let files = app.send.files.clone();
@@ -310,7 +347,7 @@ fn start(app: &mut App) {
                     _ => return Err(format!("파일을 읽을 수 없습니다: {}", p.display())),
                 }
             }
-            let ids = match net.call(ApiRequest::CreateTransfers { files: metas, reason }).await {
+            let ids = match net.call(ApiRequest::CreateTransfers { to, files: metas, reason }).await {
                 Ok(ApiResponse::Ids(ids)) => ids,
                 Ok(_) => return Err("알 수 없는 응답입니다".into()),
                 Err(e) => return Err(e.message),

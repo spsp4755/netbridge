@@ -5,7 +5,7 @@ use egui_extras::{Column, TableBuilder};
 use netbridge_proto::*;
 
 fn new_user() -> UserInput {
-    UserInput { id: None, username: String::new(), name: String::new(), dept_id: None, role: Role::User, approver_id: None, password: Some(String::new()) }
+    UserInput { id: None, username: String::new(), name: String::new(), dept_id: None, role: Role::User, approver_id: None, password: Some(String::new()), networks: vec![] }
 }
 
 pub fn users(app: &mut App, ui: &mut egui::Ui) {
@@ -56,32 +56,33 @@ pub fn users(app: &mut App, ui: &mut egui::Ui) {
                         ui.label(user_label(app, u.approver_id));
                     });
                     row.col(|ui| {
-                        let s: Vec<&str> = u.devices.iter().map(|s| s.label()).collect();
-                        ui.label(if s.is_empty() { "-".to_string() } else { s.join(", ") });
+                        let s: Vec<String> = u.devices.iter().map(|s| app.name(s)).collect();
+                        let nets = if u.networks.is_empty() { "모든 망".to_string() } else { u.networks.iter().map(|n| app.name(n)).collect::<Vec<_>>().join(", ") };
+                        ui.label(if s.is_empty() { "-".to_string() } else { s.join(", ") }).on_hover_text(format!("사용 망: {nets}"));
                     });
                     row.col(|ui| {
                         ui.horizontal(|ui| {
-                        if ui.small_button("수정").clicked() {
-                            edit = Some(u.clone());
-                        }
-                        if ui.small_button("비밀번호 초기화").clicked() {
-                            app.admin.reset_pw = Some((u.id, String::new()));
-                        }
-                        if u.locked && ui.small_button("잠금 해제").clicked() {
-                            actions.push(AdminRequest::UnlockUser { user_id: u.id });
-                        }
-                        for side in &u.devices {
-                            if ui.small_button(format!("{} PC 해제", side.label())).clicked() {
-                                actions.push(AdminRequest::ReleaseDevice { user_id: u.id, side: *side });
+                            if ui.small_button("수정").clicked() {
+                                edit = Some(u.clone());
                             }
-                        }
+                            if ui.small_button("비밀번호 초기화").clicked() {
+                                app.admin.reset_pw = Some((u.id, String::new()));
+                            }
+                            if u.locked && ui.small_button("잠금 해제").clicked() {
+                                actions.push(AdminRequest::UnlockUser { user_id: u.id });
+                            }
+                            for side in &u.devices {
+                                if ui.small_button(format!("{} PC 해제", app.name(side))).clicked() {
+                                    actions.push(AdminRequest::ReleaseDevice { user_id: u.id, side: side.clone() });
+                                }
+                            }
                         });
                     });
                 });
             }
         });
     if let Some(u) = edit {
-        app.admin.user_form = Some(UserInput { id: Some(u.id), username: u.username, name: u.name, dept_id: u.dept_id, role: u.role, approver_id: u.approver_id, password: None });
+        app.admin.user_form = Some(UserInput { id: Some(u.id), username: u.username, name: u.name, dept_id: u.dept_id, role: u.role, approver_id: u.approver_id, password: None, networks: u.networks });
     }
     for req in actions {
         adm(app, req, |a, _| {
@@ -124,6 +125,27 @@ fn user_form(app: &mut App, ui: &mut egui::Ui) {
                 ui.selectable_value(&mut f.approver_id, None, "-");
                 for u in users.iter().filter(|u| Some(u.id) != f.id) {
                     ui.selectable_value(&mut f.approver_id, Some(u.id), format!("{} ({})", u.name, u.username));
+                }
+            });
+            ui.end_row();
+            ui.label("사용 망");
+            ui.horizontal_wrapped(|ui| {
+                let all: Vec<NetId> = app.topo.as_ref().map(|t| t.networks.iter().map(|n| n.id.clone()).collect()).unwrap_or_default();
+                let mut every = f.networks.is_empty();
+                if ui.checkbox(&mut every, "모든 망").changed() {
+                    f.networks = if every { vec![] } else { all.clone() };
+                }
+                if !every {
+                    for n in &all {
+                        let mut on = f.networks.contains(n);
+                        if ui.checkbox(&mut on, app.name(n)).changed() {
+                            if on {
+                                f.networks.push(n.clone());
+                            } else {
+                                f.networks.retain(|x| x != n);
+                            }
+                        }
+                    }
                 }
             });
             ui.end_row();

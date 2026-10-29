@@ -16,6 +16,9 @@ pub struct ClientConfig {
     /// Save incoming files to `download_dir` as soon as they are ready, while the app runs.
     #[serde(default = "yes")]
     pub auto_download: bool,
+    /// Network the clipboard hotkey sends to (when this PC can reach several).
+    #[serde(default)]
+    pub clipboard_to: Option<netbridge_proto::NetId>,
 }
 
 fn yes() -> bool {
@@ -34,6 +37,7 @@ impl Default for ClientConfig {
             start_minimized: false,
             last_user: None,
             auto_download: true,
+            clipboard_to: None,
         }
     }
 }
