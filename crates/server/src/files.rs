@@ -80,3 +80,8 @@ pub fn sha256_of(path: &std::path::Path) -> std::io::Result<String> {
     }
     Ok(hex::encode(h.finalize()))
 }
+
+#[cfg(test)]
+pub fn sha256_of_bytes(b: &[u8]) -> String {
+    hex::encode(Sha256::digest(b))
+}

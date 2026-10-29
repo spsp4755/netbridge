@@ -144,38 +144,61 @@ pub struct RoutePii {
     pub action: PiiAction,
 }
 
-/// Transfer policy of one direction of one link.
+/// Transfer policy of one direction of one link. `None` fields follow the global policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutePolicy {
     pub route: Route,
     pub enabled: bool,
     pub clipboard: bool,
-    pub limits: Limits,
-    pub blocked_exts: Vec<String>,
+    pub limits: Option<Limits>,
+    pub blocked_exts: Option<Vec<String>>,
     /// Empty means every extension not in `blocked_exts` is allowed.
-    pub allowed_exts: Vec<String>,
+    pub allowed_exts: Option<Vec<String>>,
     /// First match decides; no match means pre-approval.
     pub approval_rules: Vec<ApprovalRule>,
+    /// Overrides of global PII rules for this route; a rule not listed uses its global values.
     pub pii: Vec<RoutePii>,
-    pub unscannable_action: PiiAction,
+    pub unscannable_action: Option<PiiAction>,
     pub threat_actions: Vec<(ThreatKind, PiiAction)>,
 }
 
 impl RoutePolicy {
-    /// A new route starts from the global defaults.
-    pub fn from_global(route: Route, p: &Policy) -> RoutePolicy {
+    /// A new route follows the global policy until the admin overrides its fields.
+    pub fn new(route: Route) -> RoutePolicy {
         RoutePolicy {
             route,
             enabled: true,
             clipboard: true,
-            limits: p.default_limits,
-            blocked_exts: p.blocked_exts.clone(),
-            allowed_exts: p.allowed_exts.clone(),
+            limits: None,
+            blocked_exts: None,
+            allowed_exts: None,
             approval_rules: vec![],
-            pii: p.pii_rules.iter().map(|r| RoutePii { rule_id: r.id.clone(), enabled: r.enabled, threshold: r.threshold, action: r.action }).collect(),
-            unscannable_action: p.pii_unscannable_action,
+            pii: vec![],
+            unscannable_action: None,
             threat_actions: ThreatKind::ALL.iter().map(|k| (*k, k.default_action())).collect(),
         }
+    }
+    /// Fills every inherited field from the global policy.
+    pub fn resolved(&self, g: &Policy) -> RoutePolicy {
+        RoutePolicy {
+            limits: Some(self.limits.unwrap_or(g.default_limits)),
+            blocked_exts: Some(self.blocked_exts.clone().unwrap_or_else(|| g.blocked_exts.clone())),
+            allowed_exts: Some(self.allowed_exts.clone().unwrap_or_else(|| g.allowed_exts.clone())),
+            unscannable_action: Some(self.unscannable_action.unwrap_or(g.pii_unscannable_action)),
+            ..self.clone()
+        }
+    }
+    pub fn lim(&self) -> Limits {
+        self.limits.unwrap_or(Policy::default().default_limits)
+    }
+    pub fn blocked(&self) -> &[String] {
+        self.blocked_exts.as_deref().unwrap_or_default()
+    }
+    pub fn allowed(&self) -> &[String] {
+        self.allowed_exts.as_deref().unwrap_or_default()
+    }
+    pub fn unscannable(&self) -> PiiAction {
+        self.unscannable_action.unwrap_or(PiiAction::ForcePre)
     }
     /// The global PII rules with this route's thresholds and actions.
     pub fn effective_pii(&self, global: &[PiiRule]) -> Vec<PiiRule> {

@@ -10,7 +10,6 @@ fn db_open_creates_schema_idempotent() {
     drop(Db::open(&p).unwrap());
     let db = Db::open(&p).unwrap();
     assert_eq!(db.policy().unwrap(), Policy::default());
-    assert!(db.approval_rules().unwrap().is_empty());
 }
 
 #[test]

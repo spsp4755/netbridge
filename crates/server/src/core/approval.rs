@@ -47,7 +47,7 @@ impl Core {
         let owner = self.transfer_owner(id)?;
         let route = self.route_policy(&t.route)?;
         let rules = route.effective_pii(&global.pii_rules);
-        let action = netbridge_pii::decide(&scan.hits, scan.unscannable, &rules, route.unscannable_action);
+        let action = netbridge_pii::decide(&scan.hits, scan.unscannable, &rules, route.unscannable());
         if action == Some(PiiAction::Block) {
             let mut items: Vec<String> = scan.hits.iter().map(|h| format!("{} {}건", h.name, h.count)).collect();
             if scan.unscannable {
@@ -67,7 +67,7 @@ impl Core {
         } else {
             pick_mode(&route.approval_rules, t.size, &ext_of(&t.file_name), dept)
         };
-        let pii_forced = netbridge_pii::decide(&scan.hits, false, &rules, route.unscannable_action) == Some(PiiAction::ForcePre);
+        let pii_forced = netbridge_pii::decide(&scan.hits, false, &rules, route.unscannable()) == Some(PiiAction::ForcePre);
         if mode == ApprovalMode::Pre && pii_forced && t.reason.trim().is_empty() {
             // the approver needs to know why personal data is leaving; ask the sender first
             self.db.with(|c| c.execute("UPDATE transfers SET state='AwaitingReason', mode='Pre' WHERE id=?1", [id]))?;

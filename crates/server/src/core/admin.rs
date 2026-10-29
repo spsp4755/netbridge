@@ -103,12 +103,13 @@ impl Core {
                 for r in &mut policy.approval_rules {
                     r.exts = clean(&r.exts);
                 }
-                policy.blocked_exts = clean(&policy.blocked_exts);
-                policy.allowed_exts = clean(&policy.allowed_exts);
-                if policy.limits.daily_bytes == 0 || policy.limits.per_file_bytes == 0 {
+                policy.blocked_exts = policy.blocked_exts.as_deref().map(clean);
+                policy.allowed_exts = policy.allowed_exts.as_deref().map(clean);
+                if policy.limits.is_some_and(|l| l.daily_bytes == 0 || l.per_file_bytes == 0) {
                     return Err(ApiError::bad("하루 한도와 파일 1개 한도는 0보다 커야 합니다"));
                 }
-                let old = self.route_policy(&policy.route)?;
+                self.route_policy(&policy.route)?;
+                let old = self.route_policies()?.into_iter().find(|p| p.route == policy.route).expect("checked route");
                 self.set_route_policy(&policy)?;
                 let diff = route_diff(&old, &policy);
                 self.audit(me, "policy_change", ip, &format!("통로 정책 {}: {diff}", policy.route.label(&self.topo)));

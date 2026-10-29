@@ -9,18 +9,19 @@ impl Core {
         Ok(self.db.setting(KEY)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default())
     }
 
-    /// One policy per topology route; routes nobody configured yet start from the global defaults.
+    /// One policy per topology route as the admin set it (`None` fields follow the global policy).
     pub fn route_policies(&self) -> Result<Vec<RoutePolicy>, ApiError> {
         let stored = self.stored_route_policies()?;
-        let global = self.db.policy()?;
-        Ok(self.topo.routes.iter().map(|r| stored.iter().find(|p| p.route == *r).cloned().unwrap_or_else(|| RoutePolicy::from_global(r.clone(), &global))).collect())
+        Ok(self.topo.routes.iter().map(|r| stored.iter().find(|p| p.route == *r).cloned().unwrap_or_else(|| RoutePolicy::new(r.clone()))).collect())
     }
 
+    /// The route's policy with inherited fields filled in from the global policy.
     pub fn route_policy(&self, route: &Route) -> Result<RoutePolicy, ApiError> {
         if !self.topo.has_route(route) {
             return Err(ApiError::new(ErrorCode::Forbidden, format!("허용되지 않은 통로입니다: {}", route.label(&self.topo))));
         }
-        Ok(self.route_policies()?.into_iter().find(|p| p.route == *route).expect("topology route"))
+        let p = self.route_policies()?.into_iter().find(|p| p.route == *route).expect("topology route");
+        Ok(p.resolved(&self.db.policy()?))
     }
 
     pub fn set_route_policy(&self, p: &RoutePolicy) -> Result<(), ApiError> {
@@ -42,10 +43,9 @@ impl Core {
             return Ok(());
         }
         let legacy: Vec<serde_json::Value> = self.db.setting("approval_rules")?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let global = self.db.policy()?;
         let mut out = vec![];
         for r in &self.topo.routes {
-            let mut p = RoutePolicy::from_global(r.clone(), &global);
+            let mut p = RoutePolicy::new(r.clone());
             for v in &legacy {
                 let dir = v.get("direction").and_then(|d| d.as_str());
                 let applies = match dir {
@@ -88,6 +88,7 @@ impl Core {
     /// Enabled routes the user can send on from `side`.
     pub fn routes_for(&self, user_id: i64, side: &NetId) -> Result<Vec<RoutePolicy>, ApiError> {
         let nets = self.user_networks(user_id)?;
-        Ok(self.route_policies()?.into_iter().filter(|p| p.enabled && p.route.from == *side && nets.contains(&p.route.to)).collect())
+        let g = self.db.policy()?;
+        Ok(self.route_policies()?.into_iter().filter(|p| p.enabled && p.route.from == *side && nets.contains(&p.route.to)).map(|p| p.resolved(&g)).collect())
     }
 }

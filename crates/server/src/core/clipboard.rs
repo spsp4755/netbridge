@@ -21,7 +21,7 @@ impl Core {
         let masked = netbridge_pii::mask_text(text, &rules);
         let user = Some((c.user_id, c.username.as_str()));
         // Clipboard has no approval step, so "force pre-approval" means block.
-        if matches!(netbridge_pii::decide(&hits, false, &rules, route.unscannable_action), Some(PiiAction::Block | PiiAction::ForcePre)) {
+        if matches!(netbridge_pii::decide(&hits, false, &rules, route.unscannable()), Some(PiiAction::Block | PiiAction::ForcePre)) {
             let items: Vec<String> = hits.iter().map(|h| format!("{} {}건", h.name, h.count)).collect();
             self.audit(user, "clipboard_blocked", Some(&c.ip), &format!("{} | {}", items.join(", "), clip(&masked)));
             return Err(ApiError::new(ErrorCode::Blocked, format!("개인정보가 있어 보낼 수 없습니다: {}", items.join(", "))));

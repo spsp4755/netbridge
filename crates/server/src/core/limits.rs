@@ -57,7 +57,7 @@ impl Core {
                 return Ok(l);
             }
         }
-        Ok(route.limits)
+        Ok(route.lim())
     }
 
     pub fn set_limit_override(&self, scope: LimitScope, limits: Option<Limits>) -> Result<(), ApiError> {
@@ -92,7 +92,7 @@ impl Core {
     /// `pending` is the size of files earlier in the same batch.
     pub fn check_file_with(&self, user_id: i64, p: &RoutePolicy, name: &str, size: u64, pending: u64) -> Result<(), ApiError> {
         let ext = ext_of(name);
-        if p.blocked_exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)) || (!p.allowed_exts.is_empty() && !p.allowed_exts.iter().any(|e| e.eq_ignore_ascii_case(&ext))) {
+        if p.blocked().iter().any(|e| e.eq_ignore_ascii_case(&ext)) || (!p.allowed().is_empty() && !p.allowed().iter().any(|e| e.eq_ignore_ascii_case(&ext))) {
             let shown = if ext.is_empty() { "확장자 없음".to_string() } else { ext };
             return Err(ApiError::new(ErrorCode::Blocked, format!("{name}: 보낼 수 없는 파일 형식입니다 ({shown})")));
         }

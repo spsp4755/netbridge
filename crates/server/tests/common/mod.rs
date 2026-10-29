@@ -14,6 +14,9 @@ pub struct FakePeer {
     pub files: Mutex<HashMap<i64, Vec<u8>>>,
     pub fetches: std::sync::atomic::AtomicUsize,
     pub dropped: Mutex<Vec<i64>>,
+    /// Other fake nodes reachable over a direct node-to-node link.
+    pub neighbors: Mutex<HashMap<NetId, Arc<FakePeer>>>,
+    pub forwards: Mutex<Vec<(i64, NetId)>>,
 }
 
 #[async_trait]
@@ -53,6 +56,21 @@ impl Peer for FakePeer {
     async fn online_devices(&self) -> Result<Vec<i64>, ApiError> {
         Ok(self.online.lock().unwrap().iter().copied().collect())
     }
+    async fn forward(&self, id: i64, to: &NetId, sha256: &str) -> Result<(), ApiError> {
+        let n = self.neighbors.lock().unwrap().get(to).cloned().ok_or_else(|| ApiError::new(ErrorCode::LinkDown, "no neighbor"))?;
+        let bytes = self.files.lock().unwrap().get(&id).cloned().ok_or_else(|| ApiError::bad("no file"))?;
+        if sha_hex(&bytes) != sha256 {
+            return Err(ApiError::new(ErrorCode::Conflict, "hash"));
+        }
+        n.files.lock().unwrap().insert(id, bytes);
+        self.forwards.lock().unwrap().push((id, to.clone()));
+        Ok(())
+    }
+}
+
+/// The other network of the legacy two-network layout.
+pub fn other(side: &NetId) -> NetId {
+    if *side == NetId::internal() { NetId::external() } else { NetId::internal() }
 }
 
 pub struct Kit {
@@ -64,22 +82,108 @@ pub struct Kit {
 pub fn kit() -> Kit {
     let dir = tempfile::tempdir().unwrap();
     let peer = Arc::new(FakePeer::default());
-    let core = Arc::new(Core::new(netbridge_server::db::Db::open_memory().unwrap(), dir.path().to_path_buf(), peer.clone()).unwrap());
+    let core = Arc::new(Core::two_network(netbridge_server::db::Db::open_memory().unwrap(), dir.path().to_path_buf(), peer.clone()).unwrap());
     core.clock.set(1_800_000_000); // 2027-01-15T08:00:00Z
     Kit { core, peer, _dir: dir }
+}
+
+/// Four networks A–D, central server on B; routes A-B, B-C, B-D, C-D (C and D also linked directly).
+pub struct Kit4 {
+    pub core: Arc<Core>,
+    pub peers: HashMap<NetId, Arc<FakePeer>>,
+    pub _dir: tempfile::TempDir,
+}
+
+pub fn net(s: &str) -> NetId {
+    NetId::new(s)
+}
+
+pub fn kit4() -> Kit4 {
+    let dir = tempfile::tempdir().unwrap();
+    let ids = ["A", "B", "C", "D"];
+    let networks = ids.iter().map(|i| NetInfo { id: net(i), name: format!("{i}망") }).collect();
+    let mut routes = vec![];
+    for (a, b) in [("A", "B"), ("B", "C"), ("B", "D"), ("C", "D")] {
+        routes.push(Route::new(net(a), net(b)));
+        routes.push(Route::new(net(b), net(a)));
+    }
+    let topo = Topology { hub: net("B"), networks, routes };
+    let peers: HashMap<NetId, Arc<FakePeer>> = ["A", "C", "D"].iter().map(|i| (net(i), Arc::new(FakePeer::default()))).collect();
+    peers[&net("C")].neighbors.lock().unwrap().insert(net("D"), peers[&net("D")].clone());
+    peers[&net("D")].neighbors.lock().unwrap().insert(net("C"), peers[&net("C")].clone());
+    let dyn_peers: HashMap<NetId, Arc<dyn Peer>> = peers.iter().map(|(k, v)| (k.clone(), v.clone() as Arc<dyn Peer>)).collect();
+    let core = Arc::new(Core::new(netbridge_server::db::Db::open_memory().unwrap(), dir.path().to_path_buf(), net("B"), topo, dyn_peers).unwrap());
+    core.clock.set(1_800_000_000);
+    Kit4 { core, peers, _dir: dir }
+}
+
+impl Kit4 {
+    pub fn user(&self, username: &str, approver: Option<i64>, networks: &[&str]) -> i64 {
+        let id = self
+            .core
+            .create_user(&UserInput {
+                id: None,
+                username: username.into(),
+                name: username.into(),
+                dept_id: None,
+                role: Role::User,
+                approver_id: approver,
+                password: Some(PW.into()),
+                networks: networks.iter().map(|n| net(n)).collect(),
+            })
+            .unwrap();
+        self.core.clear_must_change(id).unwrap();
+        id
+    }
+
+    pub async fn call(&self, side: &str, token: Option<&str>, req: ApiRequest) -> ApiResult {
+        self.core.handle(CallCtx { token: token.map(String::from), client_ip: format!("10.0.{}.1", side.as_bytes()[0]), side: net(side) }, req).await
+    }
+
+    pub async fn login(&self, side: &str, username: &str) -> Result<String, ApiError> {
+        match self.call(side, None, ApiRequest::Login { username: username.into(), password: PW.into(), device_key: None }).await? {
+            ApiResponse::LoggedIn { token, .. } => Ok(token),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Creates, uploads (into that network's store) and completes one file.
+    pub async fn send(&self, from: &str, to: &str, token: &str, name: &str, bytes: &[u8]) -> Result<TransferInfo, ApiError> {
+        let files = vec![FileMeta { name: name.into(), size: bytes.len() as u64, sha256: sha_hex(bytes) }];
+        let id = match self.call(from, Some(token), ApiRequest::CreateTransfers { to: net(to), files, reason: "업무".into() }).await? {
+            ApiResponse::Ids(ids) => ids[0],
+            r => panic!("{r:?}"),
+        };
+        if net(from) == self.core.net {
+            self.core.files.write_at(id, 0, bytes).unwrap();
+        } else {
+            self.peers[&net(from)].files.lock().unwrap().insert(id, bytes.to_vec());
+        }
+        match self.call(from, Some(token), ApiRequest::CompleteUpload { id }).await? {
+            ApiResponse::Transfer(t) => Ok(t),
+            r => panic!("{r:?}"),
+        }
+    }
+
+    pub fn post_rule(&self) {
+        for mut p in self.core.route_policies().unwrap() {
+            p.approval_rules = vec![ApprovalRule { order: 1, max_size: None, exts: vec![], dept_id: None, mode: ApprovalMode::Post }];
+            self.core.set_route_policy(&p).unwrap();
+        }
+    }
 }
 
 pub const PW: &str = "Passw0rd!";
 
 pub fn ctx(side: Side, token: Option<&str>) -> CallCtx {
-    CallCtx { token: token.map(String::from), client_ip: format!("10.{}.0.5", if side == Side::External { 1 } else { 2 }), side }
+    CallCtx { token: token.map(String::from), client_ip: format!("10.{}.0.5", if side == NetId::external() { 1 } else { 2 }), side }
 }
 
 impl Kit {
     pub fn user(&self, username: &str, role: Role, approver: Option<i64>) -> i64 {
         let id = self
             .core
-            .create_user(&UserInput { id: None, username: username.into(), name: format!("{username} 님"), dept_id: None, role, approver_id: approver, password: Some(PW.into()) })
+            .create_user(&UserInput { id: None, username: username.into(), name: format!("{username} 님"), dept_id: None, role, approver_id: approver, password: Some(PW.into()), networks: vec![] })
             .unwrap();
         self.core.clear_must_change(id).unwrap();
         id
@@ -113,7 +217,7 @@ impl Kit {
             .db
             .with(|c| {
                 c.execute(
-                    "INSERT INTO transfers(user_id,direction,file_name,size,sha256,reason,state,sender_ip,created_at) VALUES(?1,'ToInternal','f.txt',?2,'',?3,?4,'1.1.1.1',?5)",
+                    "INSERT INTO transfers(user_id,direction,from_net,to_net,file_name,size,sha256,reason,state,sender_ip,created_at) VALUES(?1,'','external','internal','f.txt',?2,'',?3,?4,'1.1.1.1',?5)",
                     rusqlite::params![uid, size as i64, "r", state, at],
                 )
             })
@@ -137,7 +241,8 @@ impl Kit {
 
     pub async fn create_with(&self, side: Side, token: &str, name: &str, bytes: &[u8], reason: &str) -> ApiResult {
         let files = vec![FileMeta { name: name.into(), size: bytes.len() as u64, sha256: sha_hex(bytes) }];
-        self.call(side, Some(token), ApiRequest::CreateTransfers { files, reason: reason.into() }).await
+        let to = other(&side);
+        self.call(side, Some(token), ApiRequest::CreateTransfers { to, files, reason: reason.into() }).await
     }
 
     /// Creates, uploads and completes one file from `side`; returns the transfer.
@@ -146,17 +251,14 @@ impl Kit {
     }
 
     pub async fn send_with(&self, side: Side, token: &str, name: &str, bytes: &[u8], reason: &str) -> Result<TransferInfo, ApiError> {
-        let id = match self.create_with(side, token, name, bytes, reason).await? {
+        let id = match self.create_with(side.clone(), token, name, bytes, reason).await? {
             ApiResponse::Ids(ids) => ids[0],
             r => panic!("{r:?}"),
         };
-        match side {
-            Side::Internal => {
-                self.core.files.write_at(id, 0, bytes).unwrap();
-            }
-            Side::External => {
-                self.peer.files.lock().unwrap().insert(id, bytes.to_vec());
-            }
+        if side == NetId::internal() {
+            self.core.files.write_at(id, 0, bytes).unwrap();
+        } else {
+            self.peer.files.lock().unwrap().insert(id, bytes.to_vec());
         }
         match self.call(side, Some(token), ApiRequest::CompleteUpload { id }).await? {
             ApiResponse::Transfer(t) => Ok(t),
@@ -178,18 +280,37 @@ impl Kit {
         }
     }
 
+    /// Same approval rules on every route.
     pub fn set_rules(&self, rules: Vec<ApprovalRule>) {
-        self.core.db.set_setting("approval_rules", &serde_json::to_string(&rules).unwrap()).unwrap();
+        for mut p in self.core.route_policies().unwrap() {
+            p.approval_rules = rules.clone();
+            self.core.set_route_policy(&p).unwrap();
+        }
+    }
+
+    /// Approval rules for one route only.
+    pub fn set_route_rules(&self, route: Route, rules: Vec<ApprovalRule>) {
+        let mut p = self.core.route_policy(&route).unwrap();
+        p.approval_rules = rules;
+        self.core.set_route_policy(&p).unwrap();
+    }
+
+    pub fn ext_in() -> Route {
+        Route::new(NetId::external(), NetId::internal())
+    }
+
+    pub fn int_ext() -> Route {
+        Route::new(NetId::internal(), NetId::external())
     }
 
     /// a (approver b) logged in on both sides; b logged in on both sides. Returns (a token, b token).
     pub async fn pair(&self) -> (String, String) {
         let b = self.user("b", Role::User, None);
         self.user("a", Role::User, Some(b));
-        let (ta, _) = self.login(Side::External, "a", None).await;
-        self.login(Side::Internal, "a", None).await;
-        let (tb, _) = self.login(Side::Internal, "b", None).await;
-        self.login(Side::External, "b", None).await;
+        let (ta, _) = self.login(NetId::external(), "a", None).await;
+        self.login(NetId::internal(), "a", None).await;
+        let (tb, _) = self.login(NetId::internal(), "b", None).await;
+        self.login(NetId::external(), "b", None).await;
         (ta, tb)
     }
 }

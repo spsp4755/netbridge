@@ -22,8 +22,8 @@ impl Env {
     }
     fn net(&self, side: Side) -> Arc<Net> {
         let port = match side {
-            Side::External => self.ext.app_addr.port(),
-            Side::Internal => self.int.app_addr.port(),
+            NetId::external() => self.ext.app_addr.port(),
+            NetId::internal() => self.int.app_addr.port(),
         };
         Arc::new(Net::new(&format!("https://127.0.0.1:{port}"), &self.ca()).unwrap())
     }
@@ -127,12 +127,12 @@ async fn incoming(net: &Net) -> Vec<TransferInfo> {
 async fn setup(e: &Env) -> (Arc<Net>, Arc<Net>, Arc<Net>, String) {
     let b = e.user("b", Role::User, None);
     e.user("a", Role::User, Some(b));
-    let a_int = e.net(Side::Internal);
+    let a_int = e.net(NetId::internal());
     let (_, ikey) = login(&a_int, "a", None).await;
     a_int.call(ApiRequest::Logout).await.unwrap();
     a_int.set_token(None);
-    let a_ext = e.net(Side::External);
-    let b_int = e.net(Side::Internal);
+    let a_ext = e.net(NetId::external());
+    let b_int = e.net(NetId::internal());
     login(&b_int, "b", None).await;
     (a_ext, a_int, b_int, ikey)
 }
@@ -148,7 +148,7 @@ async fn full_flow_pre_approval() {
     login(&a_ext, "a", None).await;
     let token = match next_event(&mut ev, |x| matches!(x, NetEvent::Event(Event::SessionStarted { .. }))).await {
         NetEvent::Event(Event::SessionStarted { token, me }) => {
-            assert_eq!(me.side, Side::Internal);
+            assert_eq!(me.side, NetId::internal());
             token
         }
         _ => unreachable!(),
@@ -257,7 +257,7 @@ async fn ws_reconnect_keeps_session() {
 #[tokio::test]
 async fn unknown_device_key_is_rejected_by_ws() {
     let e = env().await;
-    let net = e.net(Side::External);
+    let net = e.net(NetId::external());
     let mut rx = events(&net, "nope");
     match next_event(&mut rx, |x| matches!(x, NetEvent::Disconnected(_) | NetEvent::Rejected)).await {
         NetEvent::Rejected => {}

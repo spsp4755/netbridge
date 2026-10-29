@@ -211,11 +211,36 @@ mod tests {
         Body::from_stream(s)
     }
 
+    fn relay(dir: &std::path::Path) -> Arc<Relay> {
+        Arc::new(Relay {
+            net: NetId::new("C"),
+            link: Arc::new(LinkHub::default()),
+            files: Files::new(dir.to_path_buf()).unwrap(),
+            hub: Hub::default(),
+            neighbors: HashMap::new(),
+            topo: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn push_with_wrong_hash_is_rejected_and_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = relay(dir.path());
+        let mut h = HeaderMap::new();
+        h.insert(SHA_HEADER, "00".repeat(32).parse().unwrap());
+        assert!(put_file(State(r.clone()), Path(9), h, slow_body(b'x')).await.is_err());
+        assert!(!r.files.path(9).exists());
+        let mut h = HeaderMap::new();
+        h.insert(SHA_HEADER, crate::files::sha256_of_bytes(&vec![b'x'; 64 * 1024]).parse().unwrap());
+        assert!(put_file(State(r.clone()), Path(9), h, slow_body(b'x')).await.is_ok());
+        assert!(r.files.path(9).exists());
+    }
+
     #[tokio::test]
     async fn concurrent_pushes_of_same_id_do_not_collide() {
         let dir = tempfile::tempdir().unwrap();
-        let r = Arc::new(Relay { link: Arc::new(LinkHub::default()), files: Files::new(dir.path().to_path_buf()).unwrap(), hub: Hub::default() });
-        let (a, b) = tokio::join!(put_file(State(r.clone()), Path(7), slow_body(b'a')), put_file(State(r.clone()), Path(7), slow_body(b'b')));
+        let r = relay(dir.path());
+        let (a, b) = tokio::join!(put_file(State(r.clone()), Path(7), HeaderMap::new(), slow_body(b'a')), put_file(State(r.clone()), Path(7), HeaderMap::new(), slow_body(b'b')));
         assert!(a.is_ok() && b.is_ok());
         let got = std::fs::read(r.files.path(7)).unwrap();
         assert_eq!(got.len(), 64 * 1024);
