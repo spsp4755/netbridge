@@ -60,6 +60,8 @@ cargo run -p netbridge-server -- run --config dev/internal.toml
 
 서버 설치 순서는 `deploy/README-server.txt`를 보세요.
 
-## 라이선스 참고
+## 라이선스
+
+- NetBridge: MIT (`LICENSE`)
 
 - 한글 글꼴: 나눔고딕 (SIL Open Font License, `assets/fonts/OFL.txt`)
