@@ -3,7 +3,7 @@ Unicode true
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.1.0"
+  !define VERSION "0.2.0"
 !endif
 !define APP "NetBridge"
 !define APPNAME "NetBridge 자료전송"
@@ -28,6 +28,7 @@ VIAddVersionKey /LANG=1042 "LegalCopyright" "NetBridge contributors"
 !define MUI_FINISHPAGE_RUN_TEXT "NetBridge 실행"
 
 !insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_LICENSE "..\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
@@ -44,6 +45,7 @@ Section "NetBridge (필수)" SecMain
   SetOutPath "$INSTDIR"
   File "..\dist\win\netbridge.exe"
   File "..\assets\fonts\OFL.txt"
+  File /oname=LICENSE.txt "..\LICENSE"
   ; ca.pem placed next to the setup file is installed with the app
   IfFileExists "$EXEDIR\ca.pem" 0 +2
     CopyFiles /SILENT "$EXEDIR\ca.pem" "$INSTDIR\ca.pem"
@@ -57,6 +59,8 @@ Section "NetBridge (필수)" SecMain
   WriteRegStr HKLM "${UNINST}" "Publisher" "NetBridge"
   WriteRegStr HKLM "${UNINST}" "DisplayIcon" "$INSTDIR\netbridge.exe"
   WriteRegStr HKLM "${UNINST}" "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegStr HKLM "${UNINST}" "URLInfoAbout" "https://github.com/spsp4755/netbridge"
+  WriteRegDWORD HKLM "${UNINST}" "EstimatedSize" 20000
   WriteRegDWORD HKLM "${UNINST}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINST}" "NoRepair" 1
 SectionEnd
@@ -82,6 +86,7 @@ Section "Uninstall"
   nsExec::Exec 'taskkill /IM netbridge.exe /F'
   Delete "$INSTDIR\netbridge.exe"
   Delete "$INSTDIR\OFL.txt"
+  Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\ca.pem"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
