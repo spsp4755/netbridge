@@ -7,6 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub const CHUNK: usize = 1024 * 1024;
+/// Attempts per upload when the server answers 503.
+pub const UPLOAD_BUSY_TRIES: u64 = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetEvent {
@@ -113,6 +115,7 @@ impl Net {
         let mut pos = 0u64;
         let mut buf = vec![0u8; CHUNK];
         let mut failures = 0;
+        let mut busy = 0u64;
         loop {
             f.seek(std::io::SeekFrom::Start(pos)).await.map_err(ApiError::internal)?;
             let n = read_full(&mut f, &mut buf).await.map_err(ApiError::internal)?;
@@ -141,6 +144,10 @@ impl Net {
                 if pos >= len {
                     return Ok(());
                 }
+            } else if status.as_u16() == 503 && busy + 1 < UPLOAD_BUSY_TRIES {
+                // server busy or its link briefly down: back off 1s, 2s, ...
+                busy += 1;
+                tokio::time::sleep(Duration::from_secs(busy)).await;
             } else {
                 return Err(Self::error_of(r).await);
             }
@@ -194,10 +201,19 @@ impl Net {
         tokio::spawn(async move {
             let mut backoff = 1u64;
             loop {
-                let mut url = url::Url::parse(&format!("{}/ws", self.base.replacen("https://", "wss://", 1))).expect("url");
-                url.query_pairs_mut().append_pair("device_key", &device_key);
+                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+                let url = format!("{}/ws", self.base.replacen("https://", "wss://", 1));
+                let mut req = url.into_client_request().expect("url");
+                // a header, not the query string, so the key never lands in access logs
+                match device_key.parse() {
+                    Ok(v) => req.headers_mut().insert(DEVICE_KEY_HEADER, v),
+                    Err(_) => {
+                        let _ = tx.send(NetEvent::Rejected);
+                        return;
+                    }
+                };
                 let connector = tokio_tungstenite::Connector::Rustls(self.ws_tls.clone());
-                match tokio_tungstenite::connect_async_tls_with_config(url.as_str(), None, false, Some(connector)).await {
+                match tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(connector)).await {
                     Ok((mut ws, _)) => {
                         backoff = 1;
                         if tx.send(NetEvent::Connected).is_err() {

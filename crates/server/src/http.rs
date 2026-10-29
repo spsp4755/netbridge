@@ -69,6 +69,7 @@ type B = Arc<dyn Backend>;
 pub fn app_router(b: B) -> Router {
     Router::new()
         .route("/hello", get(hello))
+        .route("/health", get(health))
         .route("/api", post(api))
         .route("/ws", get(ws))
         .route("/upload/{id}", put(upload))
@@ -81,13 +82,19 @@ async fn hello(State(b): State<B>) -> Json<Hello> {
     Json(Hello { side: b.side(), server_time: chrono::Utc::now().timestamp() })
 }
 
+/// For monitoring; no authentication.
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "ok": true }))
+}
+
 async fn api(State(b): State<B>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Result<Json<ApiResponse>, ErrResp> {
     let req: ApiRequest = serde_json::from_slice(&body).map_err(|e| ApiError::bad(format!("요청 형식 오류: {e}")))?;
     Ok(Json(b.api(ctx_of(b.side(), &headers, addr), req).await?))
 }
 
-async fn ws(State(b): State<B>, Query(q): Query<HashMap<String, String>>, upgrade: WebSocketUpgrade) -> Result<Response, ErrResp> {
-    let key = q.get("device_key").cloned().unwrap_or_default();
+async fn ws(State(b): State<B>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, upgrade: WebSocketUpgrade) -> Result<Response, ErrResp> {
+    // shortcut: the ?device_key= query is still read for 0.1.x apps; drop it once every PC runs 0.2+
+    let key = headers.get(DEVICE_KEY_HEADER).and_then(|v| v.to_str().ok()).map(String::from).or_else(|| q.get("device_key").cloned()).unwrap_or_default();
     let dev = b.device(&key).await?.ok_or_else(|| ApiError::new(ErrorCode::Unauthorized, "등록되지 않은 기기입니다"))?;
     Ok(upgrade.on_upgrade(move |socket| run_ws(socket, b, dev)))
 }

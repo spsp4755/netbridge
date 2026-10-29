@@ -232,3 +232,17 @@ async fn release_device_disconnects_it_and_ends_session() {
     let (_, nkey) = k.login(Side::Internal, "a", None).await;
     assert_ne!(k.device_id(&nkey), idev);
 }
+
+#[tokio::test]
+async fn reset_password_ends_existing_sessions() {
+    let k = kit();
+    let t = admin(&k).await;
+    let a = k.user("a", Role::User, None);
+    let (ta, ikey) = k.login(Side::Internal, "a", None).await;
+    let mut rx = k.core.hub.register(k.device_id(&ikey));
+    adm(&k, Side::Internal, &t, AdminRequest::ResetPassword { user_id: a, new: "Reset123!@".into() }).await.unwrap();
+    assert!(matches!(rx.try_recv().unwrap(), Event::SessionEnded { .. }));
+    assert_eq!(k.call(Side::Internal, Some(&ta), ApiRequest::Me).await.unwrap_err().code, ErrorCode::SessionExpired);
+    // the admin's own session is untouched
+    assert!(k.call(Side::Internal, Some(&t), ApiRequest::Me).await.is_ok());
+}

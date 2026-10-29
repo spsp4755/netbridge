@@ -7,6 +7,10 @@ tls_cert = "certs/internal.pem"
 tls_key = "certs/internal.key"
 ca_cert = "certs/ca.pem"
 
+# 로그: 날짜별 파일, 기본은 설정 파일 옆 logs 폴더에 30개 보관
+# log_dir = "logs"
+# log_keep_days = 30
+
 [link]
 # 외부 연계서버의 연계 구간 주소. 내부 서버가 먼저 접속하며, 외부에서 내부로 들어오는 연결은 없습니다.
 external_url = "https://192.168.100.1:9443"

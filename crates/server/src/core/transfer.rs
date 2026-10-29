@@ -158,15 +158,32 @@ impl Core {
         if self.transfer_owner(id)? != c.user_id || t.state != TransferState::Uploading || t.direction.from_side() != c.side {
             return Err(ApiError::new(ErrorCode::Forbidden, "이 전송 건을 완료할 수 없습니다"));
         }
-        // unfinished uploads do not count toward the day, so the limit is checked again here
+        // unfinished uploads do not count toward the day, so the limit is checked again here,
+        // atomically with reserving this file's share so concurrent completions cannot both pass
         let l = self.effective_limits(c.user_id)?;
-        let used = self.used_today(c.user_id)?;
-        if used + t.size > l.daily_bytes {
-            return Err(ApiError::new(
-                ErrorCode::LimitExceeded,
-                format!("{}: 하루 한도({})를 넘습니다. 오늘 남은 양: {}", t.file_name, super::limits::fmt_bytes(l.daily_bytes), super::limits::fmt_bytes(l.daily_bytes.saturating_sub(used))),
-            ));
+        let start = self.kst_day_start();
+        self.db.tx(|tx| {
+            let used = super::limits::used_since(tx, c.user_id, start).map_err(ApiError::internal)?;
+            if used + t.size > l.daily_bytes {
+                return Err(ApiError::new(
+                    ErrorCode::LimitExceeded,
+                    format!("{}: 하루 한도({})를 넘습니다. 오늘 남은 양: {}", t.file_name, super::limits::fmt_bytes(l.daily_bytes), super::limits::fmt_bytes(l.daily_bytes.saturating_sub(used))),
+                ));
+            }
+            let n = tx.execute("UPDATE transfers SET reserved=1 WHERE id=?1 AND state='Uploading' AND reserved=0", [id]).map_err(ApiError::internal)?;
+            if n == 0 {
+                return Err(ApiError::new(ErrorCode::Conflict, "이미 완료 처리 중인 전송입니다"));
+            }
+            Ok(())
+        })?;
+        let res = self.finish_upload(c, id, &t).await;
+        if res.is_err() {
+            let _ = self.db.with(|db| db.execute("UPDATE transfers SET reserved=0 WHERE id=?1 AND state='Uploading'", [id]));
         }
+        res
+    }
+
+    async fn finish_upload(&self, c: &Caller, id: i64, t: &TransferInfo) -> Result<TransferInfo, ApiError> {
         let policy = self.db.policy()?;
         let scan: ScanResult = match c.side {
             Side::Internal => scan_path(&t.file_name, &self.files.path(id), &policy).map_err(|_| ApiError::bad("올린 파일이 없습니다"))?,

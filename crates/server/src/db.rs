@@ -45,6 +45,17 @@ CREATE INDEX IF NOT EXISTS audit_at ON audit(at);
 CREATE INDEX IF NOT EXISTS transfers_user ON transfers(user_id, created_at);
 "#;
 
+/// Schema plus columns added after 0.1.0 (CREATE TABLE IF NOT EXISTS never alters an old table).
+fn init(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA)?;
+    let has_reserved: bool = conn.query_row("SELECT COUNT(*) FROM pragma_table_info('transfers') WHERE name='reserved'", [], |r| r.get(0))?;
+    if !has_reserved {
+        // 1 = an Uploading transfer whose completion has claimed its share of the daily limit
+        conn.execute_batch("ALTER TABLE transfers ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
 impl Db {
     pub fn open(path: &Path) -> anyhow::Result<Db> {
         if let Some(dir) = path.parent() {
@@ -52,7 +63,7 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch(SCHEMA)?;
+        init(&conn)?;
         let db = Db(Mutex::new(conn));
         if db.setting("policy")?.is_none() {
             db.set_setting("policy", &serde_json::to_string(&Policy::default())?)?;
@@ -65,7 +76,7 @@ impl Db {
 
     pub fn open_memory() -> anyhow::Result<Db> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
+        init(&conn)?;
         let db = Db(Mutex::new(conn));
         db.set_setting("policy", &serde_json::to_string(&Policy::default())?)?;
         db.set_setting("approval_rules", "[]")?;

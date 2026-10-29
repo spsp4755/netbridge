@@ -89,16 +89,28 @@ async fn get_file(State(r): State<R>, Path(id): Path<i64>, headers: HeaderMap) -
 
 async fn put_file(State(r): State<R>, Path(id): Path<i64>, body: Body) -> Result<Response, ErrResp> {
     let path = r.files.path(id);
-    let tmp = path.with_extension("part");
-    let mut f = tokio::fs::File::create(&tmp).await.map_err(ApiError::internal)?;
+    // a unique temp name per push, so a retried or duplicate push of the same id never shares a file
+    let tmp = path.with_extension(format!("{:016x}.part", rand::random::<u64>()));
+    let res = write_stream(&tmp, body).await;
+    let res = match res {
+        Ok(()) => tokio::fs::rename(&tmp, &path).await.map_err(ApiError::internal),
+        Err(e) => Err(e),
+    };
+    if res.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    res?;
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+}
+
+async fn write_stream(tmp: &std::path::Path, body: Body) -> Result<(), ApiError> {
+    let mut f = tokio::fs::File::create(tmp).await.map_err(ApiError::internal)?;
     let mut s = body.into_data_stream();
     while let Some(chunk) = s.next().await {
         let chunk = chunk.map_err(ApiError::internal)?;
         f.write_all(&chunk).await.map_err(ApiError::internal)?;
     }
-    f.flush().await.map_err(ApiError::internal)?;
-    tokio::fs::rename(&tmp, &path).await.map_err(ApiError::internal)?;
-    Ok(Json(serde_json::json!({ "ok": true })).into_response())
+    f.sync_all().await.map_err(ApiError::internal)
 }
 
 async fn delete_file(State(r): State<R>, Path(id): Path<i64>) -> Json<serde_json::Value> {
@@ -141,4 +153,31 @@ async fn drop_device(State(r): State<R>, Json(q): Json<DropReq>) -> Json<serde_j
 
 async fn online(State(r): State<R>) -> Json<Vec<i64>> {
     Json(r.hub.online())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slow_body(byte: u8) -> Body {
+        // many small chunks with yields so two uploads interleave
+        let s = futures_util::stream::iter(0..64).then(move |_| async move {
+            tokio::task::yield_now().await;
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![byte; 1024]))
+        });
+        Body::from_stream(s)
+    }
+
+    #[tokio::test]
+    async fn concurrent_pushes_of_same_id_do_not_collide() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = Arc::new(Relay { link: Arc::new(LinkHub::default()), files: Files::new(dir.path().to_path_buf()).unwrap(), hub: Hub::default() });
+        let (a, b) = tokio::join!(put_file(State(r.clone()), Path(7), slow_body(b'a')), put_file(State(r.clone()), Path(7), slow_body(b'b')));
+        assert!(a.is_ok() && b.is_ok());
+        let got = std::fs::read(r.files.path(7)).unwrap();
+        assert_eq!(got.len(), 64 * 1024);
+        assert!(got.iter().all(|x| *x == got[0]), "file mixes two uploads");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "part")).collect();
+        assert!(leftovers.is_empty());
+    }
 }

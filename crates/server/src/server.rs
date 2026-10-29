@@ -57,7 +57,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
             let (cc, ck) = (link.client_cert.as_ref().unwrap(), link.client_key.as_ref().unwrap());
             let base = link.external_url.clone().unwrap();
             let peer = LinkPeer::new(&base, certs::client_tls(&cfg.ca_cert, Some((cc, ck)))?)?;
-            let db = Db::open(&cfg.data_dir.join("netbridge.db"))?;
+            let db = Db::open(&cfg.db_path())?;
             let core = Arc::new(Core::new(db, cfg.data_dir.clone(), Arc::new(peer))?);
             let ws_url = format!("{}/link/ws", base.trim_end_matches('/').replacen("https://", "wss://", 1));
             let link_tls = Arc::new(certs::client_tls(&cfg.ca_cert, Some((cc, ck)))?);
