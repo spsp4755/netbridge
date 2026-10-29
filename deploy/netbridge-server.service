@@ -1,0 +1,29 @@
+# systemd 예시: /etc/systemd/system/netbridge-server.service 로 복사한 뒤
+#   sudo useradd --system --home /opt/netbridge --shell /usr/sbin/nologin netbridge
+#   sudo chown -R netbridge:netbridge /opt/netbridge
+#   sudo systemctl daemon-reload && sudo systemctl enable --now netbridge-server
+# 외부 연계서버는 internal.toml 대신 external.toml 을 씁니다.
+[Unit]
+Description=NetBridge 연계서버
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netbridge
+Group=netbridge
+WorkingDirectory=/opt/netbridge
+ExecStart=/opt/netbridge/netbridge-server run --config /opt/netbridge/internal.toml
+Restart=on-failure
+RestartSec=10
+# SIGTERM으로 정상 종료합니다
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/netbridge
+
+[Install]
+WantedBy=multi-user.target
