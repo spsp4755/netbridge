@@ -278,3 +278,55 @@ async fn ws_accepts_device_key_header_only() {
     let r = tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(tokio_tungstenite::Connector::Rustls(tls))).await;
     assert!(r.is_ok(), "{:?}", r.err());
 }
+
+/// Plain-HTTP stand-in for /upload that answers 503 for the first `busy` requests.
+async fn busy_server(busy: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let h = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = l.accept().await.unwrap();
+            let n = h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut buf = vec![];
+            let mut tmp = [0u8; 4096];
+            // read headers and the declared body before answering
+            loop {
+                let m = s.read(&mut tmp).await.unwrap();
+                if m == 0 { break }
+                buf.extend_from_slice(&tmp[..m]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len: usize = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
+                    if buf.len() >= end + 4 + len { break }
+                }
+            }
+            let resp = if n < busy {
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: 2\r\n\r\n{}".to_string()
+            } else {
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: 10\r\n\r\n{\"have\":5}".to_string()
+            };
+            s.write_all(resp.as_bytes()).await.unwrap();
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+async fn upload_retries_when_server_busy() {
+    let d = tempfile::tempdir().unwrap();
+    netbridge_server::certs::gen_certs(&d.path().join("certs"), &["127.0.0.1".into()], &["127.0.0.1".into()]).unwrap();
+    let f = d.path().join("f.txt");
+    std::fs::write(&f, b"hello").unwrap();
+    let (url, hits) = busy_server(2).await;
+    let net = Net::new(&url, &d.path().join("certs/ca.pem")).unwrap();
+    net.upload(1, &f, |_| {}).await.unwrap();
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    // still busy after the retries: give up with the server's error
+    let (url, hits) = busy_server(usize::MAX).await;
+    let net = Net::new(&url, &d.path().join("certs/ca.pem")).unwrap();
+    assert!(net.upload(1, &f, |_| {}).await.is_err());
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+}

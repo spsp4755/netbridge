@@ -7,6 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub const CHUNK: usize = 1024 * 1024;
+/// Attempts per upload when the server answers 503.
+pub const UPLOAD_BUSY_TRIES: u64 = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NetEvent {
@@ -113,6 +115,7 @@ impl Net {
         let mut pos = 0u64;
         let mut buf = vec![0u8; CHUNK];
         let mut failures = 0;
+        let mut busy = 0u64;
         loop {
             f.seek(std::io::SeekFrom::Start(pos)).await.map_err(ApiError::internal)?;
             let n = read_full(&mut f, &mut buf).await.map_err(ApiError::internal)?;
@@ -141,6 +144,10 @@ impl Net {
                 if pos >= len {
                     return Ok(());
                 }
+            } else if status.as_u16() == 503 && busy + 1 < UPLOAD_BUSY_TRIES {
+                // server busy or its link briefly down: back off 1s, 2s, ...
+                busy += 1;
+                tokio::time::sleep(Duration::from_secs(busy)).await;
             } else {
                 return Err(Self::error_of(r).await);
             }
