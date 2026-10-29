@@ -26,12 +26,15 @@ enum Cmd {
     GenCerts {
         #[arg(long, default_value = "certs")]
         out: PathBuf,
-        /// 외부 연계서버 주소 (IP 또는 도메인, 여러 개 가능)
-        #[arg(long = "external-host", required = true)]
+        /// 외부 연계서버 주소 (두 망 구성, IP 또는 도메인, 여러 개 가능)
+        #[arg(long = "external-host")]
         external: Vec<String>,
-        /// 내부 연계서버 주소 (IP 또는 도메인, 여러 개 가능)
-        #[arg(long = "internal-host", required = true)]
+        /// 내부 연계서버 주소 (두 망 구성)
+        #[arg(long = "internal-host")]
         internal: Vec<String>,
+        /// 여러 망 구성: 망ID=주소[,주소...] (예: --server A=10.0.1.10 --server B=10.0.2.10). <망ID>.pem/.key 를 만듭니다
+        #[arg(long = "server")]
+        servers: Vec<String>,
     },
     /// 내부 서버에 관리자 계정을 만들거나 비밀번호를 다시 정합니다
     InitAdmin {
@@ -128,13 +131,26 @@ fn main() -> anyhow::Result<()> {
                 None => run_server(cfg, stop_signal()),
             }
         }
-        Cmd::GenCerts { out, external, internal } => {
-            netbridge_server::certs::gen_certs(&out, &external, &internal)?;
+        Cmd::GenCerts { out, external, internal, servers } => {
+            let mut named: Vec<(String, Vec<String>)> = vec![];
+            for s in &servers {
+                let (id, hosts) = s.split_once('=').context("--server 는 망ID=주소 형식입니다")?;
+                named.push((id.trim().to_string(), hosts.split(',').map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect()));
+            }
+            if !external.is_empty() {
+                named.push(("external".into(), external));
+            }
+            if !internal.is_empty() {
+                named.push(("internal".into(), internal));
+            }
+            anyhow::ensure!(!named.is_empty(), "--server 망ID=주소 (여러 망) 또는 --external-host/--internal-host (두 망) 가 필요합니다");
+            netbridge_server::certs::gen_certs_named(&out, &named)?;
             println!("인증서를 만들었습니다: {}", out.display());
-            println!("- ca.pem          : 모든 앱과 서버에 배포 (ca.key는 안전한 곳에 따로 보관)");
-            println!("- external.pem/key: 외부 연계서버");
-            println!("- internal.pem/key: 내부 연계서버");
-            println!("- link-client.*   : 내부 연계서버 (연계 구간 접속용)");
+            println!("- ca.pem        : 모든 앱과 서버에 배포 (ca.key는 안전한 곳에 따로 보관)");
+            for (id, _) in &named {
+                println!("- {id}.pem/key : 망 {id} 연계서버 (설정의 tls_cert/tls_key)");
+            }
+            println!("- link-client.* : 중앙 서버와, 이웃 망으로 직접 보내는 망 서버 (연계 구간 접속용)");
             Ok(())
         }
         Cmd::InitAdmin { config, username, password } => init_admin(&config, username, password),
@@ -152,7 +168,18 @@ fn main() -> anyhow::Result<()> {
         Cmd::InstallService { config, name } => {
             let config = std::path::absolute(&config)?;
             let cfg = ServerConfig::load(&config)?;
-            let name = name.unwrap_or_else(|| format!("NetBridge-{}", if cfg.network == netbridge_proto::NetId::internal() { "Internal".to_string() } else if cfg.network == netbridge_proto::NetId::external() { "External".to_string() } else { cfg.network.to_string() }));
+            let name = name.unwrap_or_else(|| {
+                format!(
+                    "NetBridge-{}",
+                    if cfg.network == netbridge_proto::NetId::internal() {
+                        "Internal".to_string()
+                    } else if cfg.network == netbridge_proto::NetId::external() {
+                        "External".to_string()
+                    } else {
+                        cfg.network.to_string()
+                    }
+                )
+            });
             install_service(&name, &config)
         }
         Cmd::UninstallService { name } => uninstall_service(&name),
@@ -161,9 +188,14 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(windows)]
 fn run_service(name: String, cfg: ServerConfig) -> anyhow::Result<()> {
-    netbridge_server::winsvc::run(name, Box::new(move |stop| run_server(cfg, async move {
-        let _ = stop.await;
-    })))
+    netbridge_server::winsvc::run(
+        name,
+        Box::new(move |stop| {
+            run_server(cfg, async move {
+                let _ = stop.await;
+            })
+        }),
+    )
 }
 
 #[cfg(windows)]
@@ -209,8 +241,7 @@ fn init_admin(config: &std::path::Path, username: String, password: String) -> a
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     match exists {
         Some(id) => {
-            db.with(|c| c.execute("UPDATE users SET pw_hash=?2, role='admin', locked=0, fail_count=0, must_change=0 WHERE id=?1", rusqlite::params![id, hash_password(&password)]))
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            db.with(|c| c.execute("UPDATE users SET pw_hash=?2, role='admin', locked=0, fail_count=0, must_change=0 WHERE id=?1", rusqlite::params![id, hash_password(&password)])).map_err(|e| anyhow::anyhow!("{e}"))?;
             // like an admin reset in the app: sessions opened with the old password end
             db.with(|c| c.execute("UPDATE sessions SET ended_at=?2, end_reason='비밀번호 재설정' WHERE user_id=?1 AND ended_at IS NULL", rusqlite::params![id, chrono::Utc::now().timestamp()]))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -227,4 +258,3 @@ fn init_admin(config: &std::path::Path, username: String, password: String) -> a
     }
     Ok(())
 }
-

@@ -21,7 +21,7 @@ pub struct State {
     pub to: Option<NetId>,
 }
 
-fn add(app: &mut App, p: PathBuf) {
+pub fn add(app: &mut App, p: PathBuf) {
     if p.is_dir() {
         app.toast_err(format!("폴더는 보낼 수 없습니다: {}", p.display()));
         return;

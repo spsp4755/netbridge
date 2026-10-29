@@ -10,11 +10,7 @@ pub fn pick_mode(rules: &[ApprovalRule], size: u64, ext: &str, dept_id: Option<i
     sorted.sort_by_key(|r| r.order);
     sorted
         .into_iter()
-        .find(|r| {
-            r.max_size.is_none_or(|m| size <= m)
-                && (r.exts.is_empty() || r.exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
-                && r.dept_id.is_none_or(|d| Some(d) == dept_id)
-        })
+        .find(|r| r.max_size.is_none_or(|m| size <= m) && (r.exts.is_empty() || r.exts.iter().any(|e| e.eq_ignore_ascii_case(ext))) && r.dept_id.is_none_or(|d| Some(d) == dept_id))
         .map(|r| r.mode)
         .unwrap_or(ApprovalMode::Pre)
 }
@@ -33,9 +29,7 @@ impl Core {
             if approver == user_id {
                 return Ok(Some(false));
             }
-            let proxy: Option<i64> = c
-                .query_row("SELECT 1 FROM delegations WHERE approver_id=?1 AND proxy_id=?2 AND from_date<=?3 AND to_date>=?3", params![approver, user_id, today], |r| r.get(0))
-                .optional()?;
+            let proxy: Option<i64> = c.query_row("SELECT 1 FROM delegations WHERE approver_id=?1 AND proxy_id=?2 AND from_date<=?3 AND to_date>=?3", params![approver, user_id, today], |r| r.get(0)).optional()?;
             Ok(proxy.map(|_| true))
         })
     }
@@ -68,11 +62,7 @@ impl Core {
         }
         let (approver, dept, restricted): (i64, Option<i64>, bool) =
             self.db.with(|c| c.query_row("SELECT approver_id, dept_id, post_restricted FROM users WHERE id=?1", [owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
-        let mode = if action == Some(PiiAction::ForcePre) || threat == Some(PiiAction::ForcePre) || restricted {
-            ApprovalMode::Pre
-        } else {
-            pick_mode(&route.approval_rules, t.size, &ext_of(&t.file_name), dept)
-        };
+        let mode = if action == Some(PiiAction::ForcePre) || threat == Some(PiiAction::ForcePre) || restricted { ApprovalMode::Pre } else { pick_mode(&route.approval_rules, t.size, &ext_of(&t.file_name), dept) };
         let pii_forced = netbridge_pii::decide(&scan.hits, false, &rules, route.unscannable()) == Some(PiiAction::ForcePre);
         if mode == ApprovalMode::Pre && pii_forced && t.reason.trim().is_empty() {
             // the approver needs to know why personal data is leaving; ask the sender first
@@ -88,8 +78,7 @@ impl Core {
         let now = self.clock.now();
         let approval_id = self.db.tx(|tx| {
             tx.execute("UPDATE transfers SET state='Pending', mode=?2 WHERE id=?1", params![id, enc(&mode)]).map_err(ApiError::internal)?;
-            tx.execute("INSERT INTO approvals(transfer_id,mode,approver_id,status,created_at) VALUES(?1,?2,?3,'Pending',?4)", params![id, enc(&mode), approver, now])
-                .map_err(ApiError::internal)?;
+            tx.execute("INSERT INTO approvals(transfer_id,mode,approver_id,status,created_at) VALUES(?1,?2,?3,'Pending',?4)", params![id, enc(&mode), approver, now]).map_err(ApiError::internal)?;
             Ok(tx.last_insert_rowid())
         })?;
         if mode == ApprovalMode::Post {
@@ -122,11 +111,7 @@ impl Core {
         let ev = Event::ApprovalRequested { approval_id, from: from.to_string(), file_name: file_name.to_string() };
         self.push_user(approver, ev.clone()).await;
         let today = self.today().to_string();
-        let proxy: Option<i64> = self
-            .db
-            .with(|c| c.query_row("SELECT proxy_id FROM delegations WHERE approver_id=?1 AND from_date<=?2 AND to_date>=?2", params![approver, today], |r| r.get(0)).optional())
-            .ok()
-            .flatten();
+        let proxy: Option<i64> = self.db.with(|c| c.query_row("SELECT proxy_id FROM delegations WHERE approver_id=?1 AND from_date<=?2 AND to_date>=?2", params![approver, today], |r| r.get(0)).optional()).ok().flatten();
         if let Some(p) = proxy {
             self.push_user(p, ev).await;
         }
@@ -148,6 +133,15 @@ impl Core {
         let owner = self.transfer_owner(id)?;
         self.push_user(owner, Event::TransferUpdated { transfer: self.transfer_info(id)? }).await;
         Ok(())
+    }
+
+    /// For a node receiving a neighbor's push: only a transfer being delivered to that node, with this hash.
+    pub fn expected_push(&self, to: &NetId, id: i64) -> Result<String, ApiError> {
+        let t = self.transfer_info(id)?;
+        if t.route.to != *to || self.is_local(&t.route.from) || t.state != TransferState::Delivering {
+            return Err(ApiError::new(ErrorCode::Forbidden, "지금 이 망으로 전달 중인 전송이 아닙니다"));
+        }
+        Ok(t.sha256)
     }
 
     /// Moves the payload along its route: pulled to the central server, pushed from it,
@@ -185,8 +179,7 @@ impl Core {
         let Some(as_proxy) = self.can_decide(c.user_id, approval_id)? else {
             return Err(ApiError::new(ErrorCode::Forbidden, "결재 권한이 없습니다"));
         };
-        let (tid, mode, status): (i64, String, String) =
-            self.db.with(|db| db.query_row("SELECT transfer_id, mode, status FROM approvals WHERE id=?1", [approval_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
+        let (tid, mode, status): (i64, String, String) = self.db.with(|db| db.query_row("SELECT transfer_id, mode, status FROM approvals WHERE id=?1", [approval_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))))?;
         if status != "Pending" {
             return Err(ApiError::bad("이미 처리된 결재입니다"));
         }
@@ -198,10 +191,7 @@ impl Core {
         let comment = comment.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
         let new_status = if approve { "Approved" } else { "Rejected" };
         let changed = self.db.with(|db| {
-            db.execute(
-                "UPDATE approvals SET status=?2, decided_by=?3, by_proxy=?4, comment=?5, decided_at=?6 WHERE id=?1 AND status='Pending'",
-                params![approval_id, new_status, c.user_id, as_proxy, comment, now],
-            )
+            db.execute("UPDATE approvals SET status=?2, decided_by=?3, by_proxy=?4, comment=?5, decided_at=?6 WHERE id=?1 AND status='Pending'", params![approval_id, new_status, c.user_id, as_proxy, comment, now])
         })?;
         if changed == 0 {
             return Err(ApiError::bad("이미 처리된 결재입니다"));
@@ -265,14 +255,10 @@ impl Core {
 
     pub(super) fn get_delegation(&self, uid: i64) -> Result<Option<Delegation>, ApiError> {
         self.db.with(|c| {
-            c.query_row(
-                "SELECT u.username, u.name, d.from_date, d.to_date FROM delegations d JOIN users u ON u.id=d.proxy_id WHERE d.approver_id=?1",
-                [uid],
-                |r| {
-                    let parse = |s: String| s.parse::<NaiveDate>().unwrap_or_default();
-                    Ok(Delegation { proxy_username: r.get(0)?, proxy_name: r.get(1)?, from: parse(r.get(2)?), to: parse(r.get(3)?) })
-                },
-            )
+            c.query_row("SELECT u.username, u.name, d.from_date, d.to_date FROM delegations d JOIN users u ON u.id=d.proxy_id WHERE d.approver_id=?1", [uid], |r| {
+                let parse = |s: String| s.parse::<NaiveDate>().unwrap_or_default();
+                Ok(Delegation { proxy_username: r.get(0)?, proxy_name: r.get(1)?, from: parse(r.get(2)?), to: parse(r.get(3)?) })
+            })
             .optional()
         })
     }
@@ -352,9 +338,7 @@ impl Core {
         let retry: Vec<i64> = self
             .db
             .with(|c| {
-                let mut st = c.prepare(
-                    "SELECT t.id FROM transfers t JOIN approvals a ON a.transfer_id=t.id WHERE t.state='Pending' AND (a.mode='Post' OR a.status='Approved')",
-                )?;
+                let mut st = c.prepare("SELECT t.id FROM transfers t JOIN approvals a ON a.transfer_id=t.id WHERE t.state='Pending' AND (a.mode='Post' OR a.status='Approved')")?;
                 let v = st.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
                 Ok(v)
             })

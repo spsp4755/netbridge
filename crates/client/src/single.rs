@@ -38,13 +38,15 @@ pub fn acquire() -> Option<Instance> {
 
 impl Instance {
     /// Brings the window back whenever a second launch signals.
-    pub fn on_show(self, ctx: egui::Context) {
+    pub fn on_show(self, ctx: egui::Context, wake: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         if self.event.is_null() {
             return;
         }
         std::thread::spawn(move || {
             let inst = self;
             while unsafe { WaitForSingleObject(inst.event, INFINITE) } == WAIT_OBJECT_0 {
+                // a second launch may have left files in the outbox
+                wake.store(true, std::sync::atomic::Ordering::SeqCst);
                 ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(ViewportCommand::Focus);

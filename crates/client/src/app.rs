@@ -82,13 +82,17 @@ pub struct App {
     pub about: bool,
     /// Server address comes from server.toml next to the exe.
     pub managed: bool,
+    /// Set when another launch handed over files (see outbox.rs).
+    wake: Arc<std::sync::atomic::AtomicBool>,
+    /// Files handed over before anyone logged in.
+    pending_send: Vec<std::path::PathBuf>,
     /// No server has answered yet on this PC: failures go back to the setup form.
     first_run: bool,
     retry_at: Option<Instant>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle) -> App {
+    pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle, wake: Arc<std::sync::atomic::AtomicBool>) -> App {
         theme::apply(&cc.egui_ctx);
         let (rgba, n) = crate::icon::rgba();
         let logo = cc.egui_ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied([n as usize, n as usize], &rgba), egui::TextureOptions::LINEAR);
@@ -134,6 +138,8 @@ impl App {
             logo,
             about: false,
             managed,
+            wake,
+            pending_send: vec![],
             first_run: loaded.is_none() && !managed,
             retry_at: None,
         };
@@ -412,6 +418,8 @@ impl App {
         self.locked = false;
         self.sync_clipboard_target();
         self.refresh_usage();
+        let handed = std::mem::take(&mut self.pending_send);
+        self.add_to_send(handed);
         // files that arrived while the app was closed are saved now when auto-download is on
         ui::inbox::refresh(self);
     }
@@ -449,6 +457,32 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Picks up files handed over by "NetBridge로 자료전송".
+    fn pull_outbox(&mut self) {
+        let paths = crate::outbox::take(&config_dir().join("outbox"));
+        if paths.is_empty() {
+            return;
+        }
+        if self.phase == Phase::Main {
+            self.add_to_send(paths);
+        } else {
+            self.toast_info(format!("파일 {}개를 받았습니다. 로그인하면 보낼 목록에 추가됩니다", paths.len()));
+            self.pending_send.extend(paths);
+        }
+    }
+
+    fn add_to_send(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        for p in paths {
+            ui::send::add(self, p);
+        }
+        self.go(Screen::Send);
+        self.toast_info(format!("파일 {n}개를 보낼 목록에 추가했습니다. 받는 망을 확인하고 보내세요"));
     }
 
     pub fn name(&self, n: &NetId) -> String {
@@ -847,6 +881,9 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(job) = self.rx.try_recv() {
             job(self);
+        }
+        if self.wake.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.pull_outbox();
         }
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);

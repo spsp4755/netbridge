@@ -47,6 +47,8 @@ pub struct ServerConfig {
     pub log_keep_days: usize,
     /// Node: mTLS listener for the central server and neighbor nodes.
     pub link_listen: Option<SocketAddr>,
+    /// Node: listener for neighbor nodes; accepts only file pushes the central server confirms.
+    pub neighbor_listen: Option<SocketAddr>,
     /// Client certificate for outgoing links (central → nodes, node → neighbors).
     pub client_cert: Option<PathBuf>,
     pub client_key: Option<PathBuf>,
@@ -90,6 +92,7 @@ struct Raw {
 #[derive(Deserialize, Default)]
 struct RawLink {
     listen: Option<SocketAddr>,
+    neighbor_listen: Option<SocketAddr>,
     /// Legacy internal server: the external server's link listener.
     external_url: Option<String>,
     client_cert: Option<PathBuf>,
@@ -132,6 +135,7 @@ impl ServerConfig {
             log_dir: r.log_dir,
             log_keep_days: r.log_keep_days,
             link_listen: r.link.listen,
+            neighbor_listen: r.link.neighbor_listen,
             client_cert: r.link.client_cert,
             client_key: r.link.client_key,
             topology: None,
@@ -268,5 +272,22 @@ mod tests {
     fn hub_must_link_every_network() {
         let e = ServerConfig::parse(&four_networks("[[links]]\nnetwork = \"A\"\nurl = \"https://a\"\n")).unwrap_err();
         assert!(e.to_string().contains("[[links]]"), "{e}");
+    }
+
+    /// The example files shipped in deploy/ must stay valid.
+    #[test]
+    fn shipped_examples_parse() {
+        for (name, text) in [
+            ("b-hub", include_str!("../../../deploy/multinet/b-hub.toml")),
+            ("a-node", include_str!("../../../deploy/multinet/a-node.toml")),
+            ("c-node", include_str!("../../../deploy/multinet/c-node.toml")),
+            ("d-node", include_str!("../../../deploy/multinet/d-node.toml")),
+            ("internal", include_str!("../../../deploy/internal.toml")),
+            ("external", include_str!("../../../deploy/external.toml")),
+        ] {
+            ServerConfig::parse(text).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+        }
+        let hub = ServerConfig::parse(include_str!("../../../deploy/multinet/b-hub.toml")).unwrap();
+        assert_eq!(hub.topology.unwrap().routes.len(), 8);
     }
 }

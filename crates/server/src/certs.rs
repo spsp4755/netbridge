@@ -29,6 +29,11 @@ fn leaf(cn: &str, hosts: &[String], client: bool, ca: &rcgen::Certificate, ca_ke
 
 /// Writes ca, external, internal and link-client certificates into `out`.
 pub fn gen_certs(out: &Path, external_hosts: &[String], internal_hosts: &[String]) -> Result<()> {
+    gen_certs_named(out, &[("external".to_string(), external_hosts.to_vec()), ("internal".to_string(), internal_hosts.to_vec())])
+}
+
+/// CA, one server certificate `<name>.pem/.key` per (name, hosts), and the link client certificate.
+pub fn gen_certs_named(out: &Path, servers: &[(String, Vec<String>)]) -> Result<()> {
     std::fs::create_dir_all(out)?;
     let mut ca = CertificateParams::default();
     ca.distinguished_name.push(DnType::CommonName, "NetBridge CA");
@@ -40,11 +45,9 @@ pub fn gen_certs(out: &Path, external_hosts: &[String], internal_hosts: &[String
     let write = |name: &str, body: &str| std::fs::write(out.join(name), body).with_context(|| name.to_string());
     write("ca.pem", &ca_cert.pem())?;
     write("ca.key", &ca_key.serialize_pem())?;
-    for (name, hosts, client) in [
-        ("external", external_hosts, false),
-        ("internal", internal_hosts, false),
-        ("link-client", &["netbridge-link".to_string()][..], true),
-    ] {
+    let link = vec!["netbridge-link".to_string()];
+    let all = servers.iter().map(|(n, h)| (n.as_str(), h.as_slice(), false)).chain([("link-client", link.as_slice(), true)]);
+    for (name, hosts, client) in all {
         let (cert, key) = leaf(&format!("NetBridge {name}"), hosts, client, &ca_cert, &ca_key)?;
         write(&format!("{name}.pem"), &cert)?;
         write(&format!("{name}.key"), &key)?;

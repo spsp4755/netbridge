@@ -21,12 +21,28 @@ pub struct LinkFrame {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum LinkBody {
-    Api { token: Option<String>, client_ip: String, req: ApiRequest },
-    DeviceAuth { key: String },
-    AuthorizeFile { token: Option<String>, client_ip: String, id: i64, upload: bool },
+    Api {
+        token: Option<String>,
+        client_ip: String,
+        req: ApiRequest,
+    },
+    DeviceAuth {
+        key: String,
+    },
+    AuthorizeFile {
+        token: Option<String>,
+        client_ip: String,
+        id: i64,
+        upload: bool,
+    },
     /// A node asks the central server for the network layout (for its apps' Hello).
     Topology,
     ReplyTopology(Topology),
+    /// A node asks whether a neighbor may push transfer `id` to it now; the reply is the expected SHA-256.
+    ExpectFile {
+        id: i64,
+    },
+    ReplyExpect(Result<String, ApiError>),
     ReplyApi(Result<ApiResponse, ApiError>),
     ReplyDevice(Option<i64>),
     ReplyFile(Result<FileGrant, ApiError>),
@@ -192,6 +208,7 @@ async fn answer(core: &Core, net: &NetId, body: LinkBody) -> LinkBody {
             LinkBody::ReplyFile(core.authorize_file(&CallCtx { token, client_ip, side: net.clone() }, id, op).await)
         }
         LinkBody::Topology => LinkBody::ReplyTopology(core.topo.clone()),
+        LinkBody::ExpectFile { id } => LinkBody::ReplyExpect(core.expected_push(net, id)),
         other => LinkBody::ReplyApi(Err(ApiError::bad(format!("unexpected link frame {other:?}")))),
     }
 }

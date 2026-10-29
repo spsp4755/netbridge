@@ -18,7 +18,7 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e CARGO_HOME=/cargo \
     cp \$W/netbridge.exe dist/win/
     find target/docker/x86_64-pc-windows-gnu/release/build -name netbridge.ico -path '*netbridge-client*' -exec cp {} dist/netbridge.ico \;
     (cd installer && makensis -V2 -DVERSION=$VERSION netbridge.nsi)
-    for d in server-win server-linux; do cp deploy/external.toml deploy/internal.toml deploy/README-server.txt LICENSE dist/\$d/; done
+    for d in server-win server-linux; do cp deploy/external.toml deploy/internal.toml deploy/README-server.txt LICENSE dist/\$d/; cp -r deploy/multinet dist/\$d/; done
     cp deploy/netbridge-server.service dist/server-linux/
     cp \$W/netbridge-server.exe dist/server-win/
     cp target/docker/release/netbridge-server dist/server-linux/

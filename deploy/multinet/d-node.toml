@@ -1,0 +1,20 @@
+# D망 연계서버. C↔D 통로는 중앙(B)을 거치지 않고 이 서버가 C망 서버로 직접 보냅니다.
+role = "node"
+network = "D"
+listen = "0.0.0.0:8443"
+data_dir = "data"
+tls_cert = "certs/server.pem"
+tls_key = "certs/server.key"
+ca_cert = "certs/ca.pem"
+
+[link]
+listen = "10.0.4.10:19443"
+# 이웃 망(C) 서버가 파일을 보내 오는 주소. 중앙 서버가 확인한 전송만 받습니다
+neighbor_listen = "10.0.4.10:19444"
+# 이웃 망(C)으로 보낼 때 쓰는 인증서
+client_cert = "certs/link-client.pem"
+client_key = "certs/link-client.key"
+
+[[neighbors]]
+network = "C"
+url = "https://10.0.3.10:19444"

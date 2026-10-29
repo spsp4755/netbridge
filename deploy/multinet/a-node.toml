@@ -1,0 +1,14 @@
+# A망 연계서버. A망 PC의 앱이 여기에 접속합니다. 파일은 이 서버에 보관되고 통로를 따라서만 이동합니다.
+role = "node"
+network = "A"
+listen = "0.0.0.0:8443"
+data_dir = "data"
+tls_cert = "certs/server.pem"
+tls_key = "certs/server.key"
+ca_cert = "certs/ca.pem"
+
+[link]
+# 중앙 서버(B)가 접속해 오는 주소 (연계 구간 NIC 의 IP 로 제한하세요)
+listen = "10.0.1.10:19443"
+
+# [[scanners]] 는 b-hub.toml 의 예시와 같은 형식입니다. 들여오는 파일 검사는 보내는 망 서버에서 실행됩니다.

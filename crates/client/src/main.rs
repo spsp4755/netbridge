@@ -4,6 +4,7 @@ mod app;
 mod fonts;
 mod hotkey;
 mod icon;
+mod outbox;
 #[cfg(windows)]
 mod single;
 mod theme;
@@ -21,6 +22,13 @@ fn main() -> eframe::Result<()> {
         let _ = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")).and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
         default_hook(info);
     }));
+    // "NetBridge로 자료전송" from Explorer: hand the files to the window through the outbox
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--send") {
+        let paths: Vec<std::path::PathBuf> = args[i + 1..].iter().map(std::path::PathBuf::from).collect();
+        let _ = outbox::write(&netbridge_clientcore::config::config_dir().join("outbox"), &paths);
+    }
+    let wake = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     #[cfg(windows)]
     let Some(instance) = single::acquire() else {
         // another copy is running: it has been asked to show its window
@@ -43,8 +51,8 @@ fn main() -> eframe::Result<()> {
                 cc.egui_ctx.send_viewport_cmd(cmd);
             }
             #[cfg(windows)]
-            instance.on_show(cc.egui_ctx.clone());
-            Ok(Box::new(app::App::new(cc, handle)))
+            instance.on_show(cc.egui_ctx.clone(), wake.clone());
+            Ok(Box::new(app::App::new(cc, handle, wake)))
         }),
     );
     drop(rt);

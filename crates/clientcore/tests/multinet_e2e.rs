@@ -15,13 +15,13 @@ async fn c_to_d_goes_over_the_neighbor_link() {
     let d = dir.path();
     netbridge_server::certs::gen_certs(&d.join("certs"), &["127.0.0.1".into()], &["127.0.0.1".into()]).unwrap();
     let link = "client_cert = \"certs/link-client.pem\"\nclient_key = \"certs/link-client.key\"\n";
-    std::fs::write(d.join("d.toml"), format!("role = \"node\"\nnetwork = \"D\"\nlisten = \"127.0.0.1:0\"\ndata_dir = \"d\"\n{CERTS}[link]\nlisten = \"127.0.0.1:0\"\n")).unwrap();
+    std::fs::write(d.join("d.toml"), format!("role = \"node\"\nnetwork = \"D\"\nlisten = \"127.0.0.1:0\"\ndata_dir = \"d\"\n{CERTS}[link]\nlisten = \"127.0.0.1:0\"\nneighbor_listen = \"127.0.0.1:0\"\n")).unwrap();
     let dn = start(ServerConfig::load(&d.join("d.toml")).unwrap()).await.unwrap();
     std::fs::write(
         d.join("c.toml"),
         format!(
             "role = \"node\"\nnetwork = \"C\"\nlisten = \"127.0.0.1:0\"\ndata_dir = \"c\"\n{CERTS}[link]\nlisten = \"127.0.0.1:0\"\n{link}[[neighbors]]\nnetwork = \"D\"\nurl = \"https://127.0.0.1:{}\"\n",
-            dn.link_addr.unwrap().port()
+            dn.neighbor_addr.unwrap().port()
         ),
     )
     .unwrap();
@@ -91,6 +91,15 @@ async fn c_to_d_goes_over_the_neighbor_link() {
     let out = d.join("recv");
     let got = on_d.download(&list[0], &out, |_| {}).await.unwrap();
     assert_eq!(std::fs::read_to_string(got).unwrap(), "C에서 D로");
+    // the neighbor port refuses a push the central server is not delivering to D right now
+    netbridge_server::certs::install_crypto();
+    let tls = netbridge_server::certs::client_tls(&ca, Some((&d.join("certs/link-client.pem"), &d.join("certs/link-client.key")))).unwrap();
+    let rogue = netbridge_server::link::LinkPeer::new(&format!("https://127.0.0.1:{}", dn.neighbor_addr.unwrap().port()), tls).unwrap();
+    let junk = d.join("junk.bin");
+    std::fs::write(&junk, b"injected").unwrap();
+    let e = rogue.push_checked(id, &junk, None).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Forbidden, "{e:?}");
+    assert_eq!(std::fs::read_to_string(dn.relay.as_ref().unwrap().files.path(id)).unwrap(), "C에서 D로", "rogue push replaced the file");
     for r in [hub, cn, dn] {
         r.shutdown();
     }

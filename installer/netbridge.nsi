@@ -3,7 +3,7 @@ Unicode true
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.3.0"
+  !define VERSION "0.4.0"
 !endif
 !define APP "NetBridge"
 !define APPNAME "NetBridge 자료전송"
@@ -68,6 +68,13 @@ Section "NetBridge (필수)" SecMain
   WriteRegDWORD HKLM "${UNINST}" "NoRepair" 1
 SectionEnd
 
+Section "탐색기 우클릭 메뉴 (NetBridge로 자료전송)" SecShell
+  ; every file type; the app collects the files and asks which network to send to
+  WriteRegStr HKLM "Software\Classes\*\shell\NetBridgeSend" "" "NetBridge로 자료전송"
+  WriteRegStr HKLM "Software\Classes\*\shell\NetBridgeSend" "Icon" "$INSTDIR\netbridge.exe,0"
+  WriteRegStr HKLM "Software\Classes\*\shell\NetBridgeSend\command" "" '"$INSTDIR\netbridge.exe" --send "%1"'
+SectionEnd
+
 Section "바탕화면 바로가기" SecDesktop
   SetShellVarContext all
   CreateShortcut "$DESKTOP\NetBridge 자료전송.lnk" "$INSTDIR\netbridge.exe"
@@ -80,6 +87,7 @@ SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecMain} "NetBridge 앱을 설치합니다."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecShell} "파일을 우클릭해 바로 보낼 수 있습니다. Windows 11에서는 '더 많은 옵션 표시' 안에 나옵니다."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "바탕화면에 바로가기를 만듭니다."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecStartup} "로그인하면 트레이에서 자동으로 실행합니다. 클립보드 단축키를 바로 쓸 수 있습니다."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
@@ -98,6 +106,7 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\NetBridge"
   Delete "$DESKTOP\NetBridge 자료전송.lnk"
   Delete "$SMSTARTUP\NetBridge 자료전송.lnk"
+  DeleteRegKey HKLM "Software\Classes\*\shell\NetBridgeSend"
   DeleteRegKey HKLM "${UNINST}"
   DeleteRegKey HKLM "Software\NetBridge"
   ; user settings in %APPDATA%\NetBridge are kept

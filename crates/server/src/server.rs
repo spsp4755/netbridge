@@ -6,7 +6,7 @@ use crate::files::Files;
 use crate::http::{app_router, Backend};
 use crate::hub::Hub;
 use crate::link::{run_link_client, LinkHub, LinkPeer};
-use crate::relay::{link_router, Relay};
+use crate::relay::{link_router, neighbor_router, Relay};
 use axum::Router;
 use netbridge_proto::NetId;
 use std::collections::HashMap;
@@ -17,6 +17,8 @@ use std::time::Duration;
 pub struct Running {
     pub app_addr: SocketAddr,
     pub link_addr: Option<SocketAddr>,
+    /// Node: listener for neighbor pushes.
+    pub neighbor_addr: Option<SocketAddr>,
     pub core: Option<Arc<Core>>,
     pub relay: Option<Arc<Relay>>,
     handles: Vec<axum_server::Handle>,
@@ -84,7 +86,7 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
             let backend: Arc<dyn Backend> = core.clone();
             let (app_addr, h) = serve(cfg.listen, app_tls, app_router(backend))?;
             tracing::info!("central server ({}) listening on {app_addr}, linking to {} network(s)", cfg.network, cfg.links.len());
-            Ok(Running { app_addr, link_addr: None, core: Some(core), relay: None, handles: vec![h], tasks })
+            Ok(Running { app_addr, link_addr: None, neighbor_addr: None, core: Some(core), relay: None, handles: vec![h], tasks })
         }
         Role::Node => {
             let mut neighbors = HashMap::new();
@@ -104,8 +106,16 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
             let (link_addr, h1) = serve(cfg.link_listen.unwrap(), link_tls, link_router(relay.clone()))?;
             let backend: Arc<dyn Backend> = relay.clone();
             let (app_addr, h2) = serve(cfg.listen, app_tls, app_router(backend))?;
+            let mut handles = vec![h1, h2];
+            let mut neighbor_addr = None;
+            if let Some(addr) = cfg.neighbor_listen {
+                let tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert)?;
+                let (a, h) = serve(addr, tls, neighbor_router(relay.clone()))?;
+                neighbor_addr = Some(a);
+                handles.push(h);
+            }
             tracing::info!("network {} server listening on {app_addr}, link on {link_addr}", cfg.network);
-            Ok(Running { app_addr, link_addr: Some(link_addr), core: None, relay: Some(relay), handles: vec![h1, h2], tasks: vec![] })
+            Ok(Running { app_addr, link_addr: Some(link_addr), neighbor_addr, core: None, relay: Some(relay), handles, tasks: vec![] })
         }
     }
 }

@@ -33,3 +33,16 @@ fn gen_certs_produces_chain() {
     certs::link_server_tls(&dir.path().join("external.pem"), &dir.path().join("external.key"), &dir.path().join("ca.pem")).unwrap();
     certs::client_tls(&dir.path().join("ca.pem"), Some((&dir.path().join("link-client.pem"), &dir.path().join("link-client.key")))).unwrap();
 }
+
+/// One CA issues a server certificate per network plus the link client certificate.
+#[test]
+fn gen_certs_for_named_servers() {
+    let d = tempfile::tempdir().unwrap();
+    let servers = vec![("A".to_string(), vec!["10.0.1.10".to_string()]), ("B".to_string(), vec!["10.0.2.10".to_string(), "b.example".to_string()])];
+    netbridge_server::certs::gen_certs_named(d.path(), &servers).unwrap();
+    for f in ["ca.pem", "ca.key", "A.pem", "A.key", "B.pem", "B.key", "link-client.pem", "link-client.key"] {
+        assert!(d.path().join(f).exists(), "{f}");
+    }
+    netbridge_server::certs::install_crypto();
+    netbridge_server::certs::server_tls(&d.path().join("B.pem"), &d.path().join("B.key")).unwrap();
+}

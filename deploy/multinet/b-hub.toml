@@ -1,0 +1,62 @@
+# B망 중앙 연계서버 (계정·결재·정책·감사 DB). B망 PC의 앱이 여기에 접속하고, 관리자 콘솔도 B망 PC에서 엽니다.
+role = "hub"
+network = "B"
+listen = "0.0.0.0:8443"
+data_dir = "data"
+tls_cert = "certs/server.pem"
+tls_key = "certs/server.key"
+ca_cert = "certs/ca.pem"
+
+[link]
+# 중앙 서버가 각 망 서버로 접속할 때 쓰는 인증서
+client_cert = "certs/link-client.pem"
+client_key = "certs/link-client.key"
+
+# 망 목록: id 는 짧은 영문, name 은 앱에 보이는 이름
+[[networks]]
+id = "A"
+name = "A망(인터넷)"
+[[networks]]
+id = "B"
+name = "B망(업무)"
+[[networks]]
+id = "C"
+name = "C망"
+[[networks]]
+id = "D"
+name = "D망"
+
+# 허용된 통로 (양방향). 여기에 없는 망끼리는 보낼 수 없습니다. A↔C, A↔D 는 없음.
+[[routes]]
+a = "A"
+b = "B"
+[[routes]]
+a = "B"
+b = "C"
+[[routes]]
+a = "B"
+b = "D"
+[[routes]]
+a = "C"
+b = "D"
+
+# 중앙 서버는 다른 모든 망 서버와 직접 연결되어야 합니다 (각 망 서버의 [link] listen 주소)
+[[links]]
+network = "A"
+url = "https://10.0.1.10:19443"
+[[links]]
+network = "C"
+url = "https://10.0.3.10:19443"
+[[links]]
+network = "D"
+url = "https://10.0.4.10:19443"
+
+# 백신·CDR 연동 (이 서버에 저장되는 파일 = B망에서 보낸 파일과 B망으로 들어온 파일)
+# [[scanners]]
+# name = "사내 백신"
+# command = ["C:/Program Files/AV/cli-scan.exe", "{file}"]
+# infected_exit_codes = [1]
+# timeout_secs = 60
+# [[scanners]]
+# name = "CDR"
+# cdr_command = ["C:/CDR/sanitize.exe", "{file}", "{out}"]

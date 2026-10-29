@@ -6,8 +6,6 @@ use crate::files::Files;
 use crate::http::{serve_file, Backend, ErrResp};
 use crate::hub::Hub;
 use crate::link::{LinkBody, LinkHub, LinkPeer, SHA_HEADER};
-use std::collections::HashMap;
-use std::sync::Mutex;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
@@ -18,7 +16,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
 use netbridge_proto::*;
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
@@ -83,7 +83,22 @@ impl Backend for Relay {
 
 type R = Arc<Relay>;
 
-/// Routes served only on the mTLS link listener.
+/// Neighbor nodes may only push files that the central server says are on their way here.
+pub fn neighbor_router(r: R) -> Router {
+    Router::new().route("/link/files/{id}", axum::routing::put(neighbor_put)).layer(DefaultBodyLimit::disable()).with_state(r)
+}
+
+async fn neighbor_put(State(r): State<R>, Path(id): Path<i64>, body: Body) -> Result<Response, ErrResp> {
+    let want = match r.link.call(LinkBody::ExpectFile { id }, Duration::from_secs(30)).await? {
+        LinkBody::ReplyExpect(res) => res?,
+        _ => return Err(unexpected().into()),
+    };
+    let mut h = HeaderMap::new();
+    h.insert(SHA_HEADER, want.parse().map_err(|_| ApiError::internal("hash"))?);
+    put_file(State(r), Path(id), h, body).await
+}
+
+/// Routes served only on the mTLS link listener (the central server's side).
 pub fn link_router(r: R) -> Router {
     Router::new()
         .route("/link/ws", get(link_ws))
