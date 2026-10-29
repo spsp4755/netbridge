@@ -2800,6 +2800,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "netbridge-scan"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "netbridge-server"
 version = "0.3.0"
 dependencies = [

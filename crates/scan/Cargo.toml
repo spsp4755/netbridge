@@ -1,0 +1,11 @@
+[package]
+name = "netbridge-scan"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+serde_json.workspace = true
