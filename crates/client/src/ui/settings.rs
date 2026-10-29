@@ -27,7 +27,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     card(ui, |ui| hotkey_section(app, ui));
     ui.add_space(10.0);
     card(ui, |ui| {
-        section_title(ui, "받은 파일 저장 폴더");
+        section_title(ui, "받은 파일");
+        if ui.checkbox(&mut app.cfg.auto_download, "도착한 파일을 자동으로 저장 (프로그램이 실행 중일 때)").changed() {
+            save(app);
+            if app.cfg.auto_download {
+                crate::ui::inbox::refresh(app);
+            }
+        }
+        ui.label(muted("저장 폴더"));
         ui.horizontal(|ui| {
             ui.label(RichText::new(app.cfg.download_dir.display().to_string()).monospace());
             if ui.add(secondary("바꾸기")).clicked() {

@@ -12,6 +12,13 @@ pub struct State {
     pub items: Vec<TransferInfo>,
     pub busy: HashSet<i64>,
     pub last_saved: Option<PathBuf>,
+    /// Automatic saves that failed; the user retries those with the button.
+    pub failed: HashSet<i64>,
+}
+
+/// Incoming files to save automatically: ready, not already downloading, not failed before.
+pub fn to_auto_download(items: &[TransferInfo], busy: &HashSet<i64>, failed: &HashSet<i64>) -> Vec<TransferInfo> {
+    items.iter().filter(|t| t.state == TransferState::Available && !busy.contains(&t.id) && !failed.contains(&t.id)).cloned().collect()
 }
 
 pub fn refresh(app: &mut App) {
@@ -19,13 +26,23 @@ pub fn refresh(app: &mut App) {
         if let ApiResponse::Transfers(v) = r {
             a.inbox.items = v;
             a.inbox.loaded = true;
+            if a.cfg.auto_download && a.phase == crate::app::Phase::Main {
+                for t in to_auto_download(&a.inbox.items, &a.inbox.busy, &a.inbox.failed) {
+                    start_download(a, t, true);
+                }
+            }
         }
     });
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let from = app.side.map(|s| s.other().label()).unwrap_or("반대편 망");
-    page_header(ui, "받은 파일", Some(&format!("{from}에서 보낸 파일입니다. 받으면 저장 폴더에 저장됩니다.")));
+    let sub = if app.cfg.auto_download {
+        format!("{from}에서 보낸 파일입니다. 프로그램이 실행 중이면 도착하는 대로 저장 폴더에 자동으로 저장됩니다.")
+    } else {
+        format!("{from}에서 보낸 파일입니다. [받기]를 누르면 저장 폴더에 저장됩니다.")
+    };
+    page_header(ui, "받은 파일", Some(&sub));
     ui.horizontal(|ui| {
         ui.label(muted("저장 폴더"));
         ui.label(app.cfg.download_dir.display().to_string());
@@ -120,11 +137,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             })
     });
     if let Some(t) = download {
-        start_download(app, t);
+        app.inbox.failed.remove(&t.id);
+        start_download(app, t, false);
     }
 }
 
-fn start_download(app: &mut App, t: TransferInfo) {
+fn start_download(app: &mut App, t: TransferInfo, auto: bool) {
     let Some(net) = app.net.clone() else { return };
     app.inbox.busy.insert(t.id);
     let dir = app.cfg.download_dir.clone();
@@ -139,12 +157,55 @@ fn start_download(app: &mut App, t: TransferInfo) {
             a.inbox.busy.remove(&id);
             match r {
                 Ok(p) => {
-                    a.toast(format!("저장했습니다: {}", p.display()));
+                    let what = if auto { "자동으로 받았습니다" } else { "저장했습니다" };
+                    a.toast(format!("{what}: {}", p.display()));
                     a.inbox.last_saved = Some(p);
                     refresh(a);
                 }
-                Err(e) => a.api_error(e),
+                Err(e) => {
+                    if auto {
+                        a.inbox.failed.insert(id);
+                        a.toast_err(format!("자동으로 받지 못했습니다 — 받은 파일 화면에서 다시 받으세요 ({})", e.message));
+                    } else {
+                        a.api_error(e);
+                    }
+                }
             }
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(id: i64, state: TransferState) -> TransferInfo {
+        TransferInfo {
+            id,
+            owner: "kim".into(),
+            direction: Direction::ToExternal,
+            file_name: "a.txt".into(),
+            size: 1,
+            sha256: "x".into(),
+            reason: String::new(),
+            state,
+            mode: None,
+            pii: vec![],
+            unscannable: false,
+            block_reason: None,
+            sender_ip: "10.0.0.1".into(),
+            receiver_ip: None,
+            created_at: 0,
+            approval: None,
+        }
+    }
+
+    #[test]
+    fn auto_download_picks_available_not_busy_not_failed() {
+        let items = vec![t(1, TransferState::Available), t(2, TransferState::Downloaded), t(3, TransferState::Available), t(4, TransferState::Available)];
+        let busy = HashSet::from([3]);
+        let failed = HashSet::from([4]);
+        let ids: Vec<i64> = to_auto_download(&items, &busy, &failed).iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![1]);
+    }
 }

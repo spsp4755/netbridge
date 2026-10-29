@@ -330,6 +330,8 @@ impl App {
         self.last_input = Instant::now();
         self.locked = false;
         self.refresh_usage();
+        // files that arrived while the app was closed are saved now when auto-download is on
+        ui::inbox::refresh(self);
     }
 
     pub fn on_logged_in(&mut self, token: String, device_key: String, me: Me) {

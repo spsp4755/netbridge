@@ -13,6 +13,9 @@ pub struct ClientConfig {
     /// Device keys are per user; this picks the key used to wait for pushes before anyone logs in.
     #[serde(default)]
     pub last_user: Option<String>,
+    /// Save incoming files to `download_dir` as soon as they are ready, while the app runs.
+    #[serde(default = "yes")]
+    pub auto_download: bool,
 }
 
 fn yes() -> bool {
@@ -30,6 +33,7 @@ impl Default for ClientConfig {
             download_dir: dirs::download_dir().unwrap_or_else(|| PathBuf::from(".")).join("NetBridge"),
             start_minimized: false,
             last_user: None,
+            auto_download: true,
         }
     }
 }
@@ -74,5 +78,7 @@ mod tests {
         // older config files without start_minimized still load
         let old: ClientConfig = toml::from_str("server_url='x'\nca_pem_path='c'\nhotkey='Alt+F3'\ndownload_dir='d'\n").unwrap();
         assert!(old.start_minimized);
+        assert!(old.auto_download);
+        assert!(c.auto_download);
     }
 }
