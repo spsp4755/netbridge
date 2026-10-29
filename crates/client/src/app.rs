@@ -2,7 +2,7 @@ use crate::hotkey::Hotkeys;
 use crate::theme::{self, Tone};
 use crate::ui;
 use eframe::egui::{self, Color32, RichText, ViewportCommand};
-use netbridge_clientcore::config::{config_dir, ClientConfig};
+use netbridge_clientcore::config::{config_dir, exe_dir, ClientConfig};
 use netbridge_clientcore::net::{Net, NetEvent};
 use netbridge_clientcore::secret;
 use netbridge_proto::*;
@@ -18,6 +18,8 @@ pub type Job = Box<dyn FnOnce(&mut App) + Send>;
 pub enum Phase {
     Setup,
     Connecting,
+    /// Configured server unreachable: users can only retry (only admins change the address).
+    Offline,
     Login,
     Main,
 }
@@ -74,6 +76,11 @@ pub struct App {
     pub lock: ui::login::LockState,
     pub logo: egui::TextureHandle,
     pub about: bool,
+    /// Server address comes from server.toml next to the exe.
+    pub managed: bool,
+    /// No server has answered yet on this PC: failures go back to the setup form.
+    first_run: bool,
+    retry_at: Option<Instant>,
 }
 
 impl App {
@@ -83,12 +90,14 @@ impl App {
         let logo = cc.egui_ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied([n as usize, n as usize], &rgba), egui::TextureOptions::LINEAR);
         let (tx, rx) = channel();
         let loaded = ClientConfig::load();
+        let mut cfg = loaded.clone().unwrap_or_default();
+        let managed = cfg.apply_managed(&exe_dir());
         let mut app = App {
             ctx: cc.egui_ctx.clone(),
             rt,
             tx: tx.clone(),
             rx,
-            cfg: loaded.clone().unwrap_or_default(),
+            cfg,
             net: None,
             net_slot: Arc::new(Mutex::new(None)),
             side: None,
@@ -118,11 +127,17 @@ impl App {
             lock: Default::default(),
             logo,
             about: false,
+            managed,
+            first_run: loaded.is_none() && !managed,
+            retry_at: None,
         };
         app.setup.server_url = app.cfg.server_url.clone();
         app.setup.ca_path = app.cfg.ca_pem_path.display().to_string();
         app.init_hotkey();
-        if loaded.is_some() {
+        if loaded.is_none() && managed {
+            let _ = app.cfg.save();
+        }
+        if loaded.is_some() || managed {
             app.connect();
         }
         app
@@ -209,8 +224,7 @@ impl App {
         let net = match Net::new(&self.cfg.server_url, &self.cfg.ca_pem_path) {
             Ok(n) => Arc::new(n),
             Err(e) => {
-                self.phase = Phase::Setup;
-                self.setup.error = Some(e.to_string());
+                self.connect_failed(e.to_string());
                 return;
             }
         };
@@ -219,6 +233,8 @@ impl App {
         self.phase = Phase::Connecting;
         self.run(async move { net.hello().await }, |a, r| match r {
             Ok(h) => {
+                a.first_run = false;
+                a.retry_at = None;
                 a.side = Some(h.side);
                 a.phase = Phase::Login;
                 a.ctx.send_viewport_cmd(ViewportCommand::Title(format!("NetBridge 자료전송 — {}", h.side.label())));
@@ -229,10 +245,58 @@ impl App {
                     }
                 }
             }
-            Err(e) => {
-                a.phase = Phase::Setup;
-                a.setup.error = Some(e.message);
+            Err(e) => a.connect_failed(e.message),
+        });
+    }
+
+    fn connect_failed(&mut self, msg: String) {
+        self.setup.error = Some(msg);
+        if self.first_run {
+            self.phase = Phase::Setup;
+        } else {
+            self.phase = Phase::Offline;
+            self.retry_at = Some(Instant::now() + Duration::from_secs(15));
+        }
+    }
+
+    /// Admin only: leaves the session and opens the server address form.
+    pub fn change_server(&mut self) {
+        let to_setup = |a: &mut App| {
+            a.local_logout("서버 주소를 바꾸려고 로그아웃했습니다");
+            a.setup.server_url = a.cfg.server_url.clone();
+            a.setup.ca_path = a.cfg.ca_pem_path.display().to_string();
+            a.setup.error = None;
+            a.phase = Phase::Setup;
+        };
+        self.api_or(ApiRequest::Logout, move |a, _| to_setup(a), |_, _| {});
+    }
+
+    fn offline_screen(&mut self, ui: &mut egui::Ui) {
+        let logo = self.logo.clone();
+        let wait = self.retry_at.map(|t| t.saturating_duration_since(Instant::now()));
+        if wait == Some(Duration::ZERO) {
+            self.retry_at = None;
+            self.connect();
+            return;
+        }
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() / 2.0 - 140.0);
+            ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(56.0, 56.0)));
+            ui.add_space(10.0);
+            ui.label(theme::bold("서버에 연결할 수 없습니다", 20.0));
+            if let Some(e) = &self.setup.error {
+                ui.label(theme::muted(e));
             }
+            ui.add_space(8.0);
+            if ui.add(theme::primary("다시 연결")).clicked() {
+                self.connect();
+            }
+            if let Some(w) = wait {
+                ui.label(RichText::new(format!("{}초 뒤 자동으로 다시 연결합니다", w.as_secs() + 1)).small().color(theme::MUTED));
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
+            }
+            ui.add_space(16.0);
+            ui.label(theme::muted("네트워크 연결을 확인하세요. 계속 연결되지 않으면 시스템 관리자에게 문의하세요."));
         });
     }
 
@@ -429,8 +493,14 @@ impl App {
                 ui.add_space(-10.0);
                 ui.label(RichText::new(v).small());
             };
-            if let Some(side) = self.side {
-                item(ui, &format!("{} 서버", side.label()), self.cfg.server_url.clone());
+            // connection details are for administrators only
+            if let (Some(side), Some(me)) = (self.side, &self.me) {
+                if me.role == Role::Admin {
+                    item(ui, &format!("{} 서버", side.label()), self.cfg.server_url.clone());
+                }
+            }
+            if let Some(u) = &self.usage {
+                item(ui, "오늘 전송", format!("{} / {}", ui::fmt_bytes(u.used_today), ui::fmt_bytes(u.limits.daily_bytes)));
             }
             if let Some(me) = &self.me {
                 item(ui, "내 IP", me.client_ip.clone());
@@ -719,6 +789,9 @@ impl eframe::App for App {
         match self.phase {
             Phase::Setup => {
                 egui::CentralPanel::default().show(ctx, |ui| ui::setup::show(self, ui));
+            }
+            Phase::Offline => {
+                egui::CentralPanel::default().show(ctx, |ui| self.offline_screen(ui));
             }
             Phase::Connecting => {
                 egui::CentralPanel::default().show(ctx, |ui| {

@@ -105,10 +105,7 @@ async fn concurrent_completes_cannot_both_pass_daily_limit() {
         k.peer.files.lock().unwrap().insert(id, body.to_vec());
         ids.push(id);
     }
-    let (r1, r2) = tokio::join!(
-        k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id: ids[0] }),
-        k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id: ids[1] }),
-    );
+    let (r1, r2) = tokio::join!(k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id: ids[0] }), k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id: ids[1] }),);
     let ok = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
     assert_eq!(ok, 1, "{r1:?} / {r2:?}");
     assert!(k.core.used_today(a).unwrap() <= 10);
@@ -127,4 +124,34 @@ async fn failed_complete_releases_reservation() {
     let e = k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id }).await.unwrap_err();
     assert_eq!(e.code, ErrorCode::Conflict);
     assert_eq!(k.core.used_today(a).unwrap(), 0);
+}
+
+/// Daily 10, per file 2: five files of 1.9 sent in one batch all go through (9.5 of 10).
+#[tokio::test]
+async fn batch_of_large_files_within_daily_limit_is_allowed() {
+    let k = kit();
+    let b = k.user("b", Role::User, None);
+    k.user("a", Role::User, Some(b));
+    let (it, _) = k.login(Side::Internal, "a", None).await;
+    let limits = Limits { daily_bytes: 10 * MB, per_file_bytes: 2 * MB };
+    let mut p = Policy::default();
+    p.default_limits = limits;
+    k.core.set_policy(&p, None).await.unwrap();
+    let size = 19 * MB / 10;
+    let bodies: Vec<Vec<u8>> = (0..5u8).map(|i| vec![b'a' + i; size as usize]).collect();
+    let files = bodies.iter().enumerate().map(|(i, b)| FileMeta { name: format!("big{i}.bin"), size, sha256: sha_hex(b) }).collect();
+    let ids = match k.call(Side::Internal, Some(&it), ApiRequest::CreateTransfers { files, reason: String::new() }).await.unwrap() {
+        ApiResponse::Ids(ids) => ids,
+        r => panic!("{r:?}"),
+    };
+    assert_eq!(ids.len(), 5);
+    for (id, b) in ids.iter().zip(&bodies) {
+        k.core.files.write_at(*id, 0, b).unwrap();
+        let r = k.call(Side::Internal, Some(&it), ApiRequest::CompleteUpload { id: *id }).await;
+        assert!(r.is_ok(), "file {id}: {r:?}");
+    }
+    // a sixth 1.9 file would go over 10
+    let extra = vec![b'z'; size as usize];
+    let e = k.create(Side::Internal, &it, "big5.bin", &extra).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::LimitExceeded);
 }

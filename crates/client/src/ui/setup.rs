@@ -47,5 +47,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             app.connect();
         }
+        if !app.cfg.server_url.is_empty() && ui.add_sized([w, 34.0], secondary("취소")).clicked() {
+            app.connect();
+        }
     });
 }

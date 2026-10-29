@@ -45,6 +45,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             add(app, p);
         }
     }
+    usage_card(app, ui);
+    ui.add_space(12.0);
     let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
     let zone = card_frame().fill(if hovering { ACCENT_SOFT } else { CARD }).stroke(egui::Stroke::NONE).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -60,10 +62,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         add(app, p);
                     }
                 }
-            }
-            if let Some(u) = &app.usage {
-                let left = u.limits.daily_bytes.saturating_sub(u.used_today);
-                ui.label(RichText::new(format!("파일 1개 최대 {} · 오늘 남은 용량 {}", fmt_bytes(u.limits.per_file_bytes), fmt_bytes(left))).small().color(MUTED));
             }
             ui.add_space(6.0);
         });
@@ -126,7 +124,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.label(muted("선택 입력입니다. 개인정보가 탐지된 파일은 결재를 요청할 때 사유를 꼭 적어야 합니다."));
         ui.add(egui::TextEdit::multiline(&mut app.send.reason).desired_rows(2).desired_width(f32::INFINITY).hint_text("예: 고객 제출용 보고서 반입").margin(egui::vec2(10.0, 8.0)));
         ui.add_space(6.0);
-        let can = !app.send.busy && !app.send.files.is_empty();
+        let fits = app.usage.as_ref().map_or(true, |u| batch_check(&app.send.files.iter().map(|(_, s)| *s).collect::<Vec<_>>(), u).is_ok());
+        let can = !app.send.busy && !app.send.files.is_empty() && fits;
         ui.horizontal(|ui| {
             let label = if app.send.files.is_empty() { "보내기".to_string() } else { format!("{}개 파일 보내기", app.send.files.len()) };
             if ui.add_enabled(can, primary(&label).min_size(egui::vec2(160.0, 38.0))).clicked() {
@@ -179,6 +178,74 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.send.reason_for = Some((id, name, String::new()));
         }
     }
+}
+
+/// Today's allowance: limit, used, left, per-file maximum, and whether the selected files fit.
+fn usage_card(app: &App, ui: &mut egui::Ui) {
+    let Some(u) = &app.usage else { return };
+    let left = u.limits.daily_bytes.saturating_sub(u.used_today);
+    let selected: u64 = app.send.files.iter().map(|(_, s)| s).sum();
+    let check = batch_check(&app.send.files.iter().map(|(_, s)| *s).collect::<Vec<_>>(), u);
+    card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(muted("오늘 전송 한도"));
+                ui.label(bold(fmt_bytes(u.limits.daily_bytes), 20.0).color(TEXT));
+            });
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.label(muted("사용함"));
+                ui.label(bold(fmt_bytes(u.used_today), 20.0).color(ACCENT));
+            });
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.label(muted("남음"));
+                ui.label(bold(fmt_bytes(left), 20.0).color(if left == 0 { DANGER } else { SUCCESS }));
+            });
+            ui.add_space(24.0);
+            ui.vertical(|ui| {
+                ui.label(muted("파일 1개 최대"));
+                ui.label(bold(fmt_bytes(u.limits.per_file_bytes), 20.0).color(TEXT));
+            });
+        });
+        ui.add_space(4.0);
+        let frac = if u.limits.daily_bytes > 0 { (u.used_today as f32 / u.limits.daily_bytes as f32).min(1.0) } else { 1.0 };
+        let after = if u.limits.daily_bytes > 0 { ((u.used_today + selected) as f32 / u.limits.daily_bytes as f32).min(1.0) } else { 1.0 };
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(bar, 5.0, NEUTRAL_SOFT);
+        if after > frac {
+            let mut r = bar;
+            r.set_width(bar.width() * after);
+            p.rect_filled(r, 5.0, if check.is_ok() { Color32::from_rgb(160, 190, 245) } else { DANGER_SOFT });
+        }
+        if frac > 0.0 {
+            let mut r = bar;
+            r.set_width((bar.width() * frac).max(10.0));
+            p.rect_filled(r, 5.0, if frac > 0.9 { DANGER } else { ACCENT });
+        }
+        let pct = if u.limits.daily_bytes > 0 { u.used_today * 100 / u.limits.daily_bytes } else { 100 };
+        ui.label(RichText::new(format!("오늘 {pct}% 사용 · 한국 시간 자정에 초기화됩니다")).small().color(MUTED));
+        if !app.send.files.is_empty() {
+            match &check {
+                Ok(()) => banner(ui, Tone::Info, &format!("선택한 파일 {}개, 모두 {} — 보낸 뒤 남는 양 {}", app.send.files.len(), fmt_bytes(selected), fmt_bytes(left - selected))),
+                Err(msg) => banner(ui, Tone::Danger, msg),
+            }
+        }
+    });
+}
+
+/// Same rule as the server: every file within the per-file limit and the batch within what is left today.
+pub fn batch_check(sizes: &[u64], u: &Usage) -> Result<(), String> {
+    if let Some(s) = sizes.iter().find(|s| **s > u.limits.per_file_bytes) {
+        return Err(format!("파일 1개 최대 {}를 넘는 파일이 있습니다 ({})", fmt_bytes(u.limits.per_file_bytes), fmt_bytes(*s)));
+    }
+    let total: u64 = sizes.iter().sum();
+    let left = u.limits.daily_bytes.saturating_sub(u.used_today);
+    if total > left {
+        return Err(format!("선택한 파일이 모두 {}로 오늘 남은 양 {}를 넘습니다. 일부를 빼거나 내일 보내세요", fmt_bytes(total), fmt_bytes(left)));
+    }
+    Ok(())
 }
 
 /// Asks the sender why a file with personal data is being sent, then submits it for pre-approval.
@@ -291,4 +358,24 @@ fn start(app: &mut App) {
             a.refresh_usage();
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GB: u64 = 1024 * 1024 * 1024;
+
+    fn usage(used: u64) -> Usage {
+        Usage { used_today: used, limits: Limits { daily_bytes: 10 * GB, per_file_bytes: 2 * GB } }
+    }
+
+    #[test]
+    fn five_files_of_1_9_gb_fit_a_10_gb_day_with_2_gb_files() {
+        let f = 19 * GB / 10;
+        assert!(batch_check(&[f; 5], &usage(0)).is_ok());
+        assert!(batch_check(&[f; 6], &usage(0)).is_err());
+        assert!(batch_check(&[f; 5], &usage(GB)).is_err());
+        assert!(batch_check(&[2 * GB + 1], &usage(0)).is_err());
+    }
 }

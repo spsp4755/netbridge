@@ -43,6 +43,21 @@ pub fn default_ca() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("ca.pem"))).unwrap_or_else(|| PathBuf::from("ca.pem"))
 }
 
+/// Server address deployed by IT next to the executable; when present users cannot change it.
+pub const MANAGED_FILE: &str = "server.toml";
+
+#[derive(Deserialize)]
+struct Managed {
+    server_url: String,
+    #[serde(default)]
+    ca_pem_path: Option<PathBuf>,
+}
+
+/// Folder holding the executable (where the installer puts server.toml and ca.pem).
+pub fn exe_dir() -> PathBuf {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
+}
+
 pub fn config_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("NetBridge")
 }
@@ -50,6 +65,18 @@ pub fn config_dir() -> PathBuf {
 impl ClientConfig {
     pub fn path() -> PathBuf {
         config_dir().join("config.toml")
+    }
+
+    /// Applies `dir/server.toml` if it exists; returns whether the server is managed.
+    pub fn apply_managed(&mut self, dir: &std::path::Path) -> bool {
+        let Some(m) = std::fs::read_to_string(dir.join(MANAGED_FILE)).ok().and_then(|t| toml::from_str::<Managed>(&t).ok()) else { return false };
+        self.server_url = m.server_url.trim().trim_end_matches('/').to_string();
+        self.ca_pem_path = match m.ca_pem_path {
+            Some(p) if p.is_absolute() => p,
+            Some(p) => dir.join(p),
+            None => dir.join("ca.pem"),
+        };
+        true
     }
 
     /// None on first run.
@@ -80,5 +107,19 @@ mod tests {
         assert!(old.start_minimized);
         assert!(old.auto_download);
         assert!(c.auto_download);
+    }
+
+    #[test]
+    fn managed_server_file_overrides_user_settings() {
+        let dir = std::env::temp_dir().join(format!("nb-managed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = ClientConfig { server_url: "https://user-typed:1".into(), ..Default::default() };
+        assert!(!c.apply_managed(&dir));
+        assert_eq!(c.server_url, "https://user-typed:1");
+        std::fs::write(dir.join(MANAGED_FILE), "server_url = \"https://10.0.0.10:8443/\"\n").unwrap();
+        assert!(c.apply_managed(&dir));
+        assert_eq!(c.server_url, "https://10.0.0.10:8443");
+        assert_eq!(c.ca_pem_path, dir.join("ca.pem"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

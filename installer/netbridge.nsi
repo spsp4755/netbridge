@@ -3,7 +3,7 @@ Unicode true
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.2.0"
+  !define VERSION "0.3.0"
 !endif
 !define APP "NetBridge"
 !define APPNAME "NetBridge 자료전송"
@@ -49,6 +49,9 @@ Section "NetBridge (필수)" SecMain
   ; ca.pem placed next to the setup file is installed with the app
   IfFileExists "$EXEDIR\ca.pem" 0 +2
     CopyFiles /SILENT "$EXEDIR\ca.pem" "$INSTDIR\ca.pem"
+  ; server.toml placed next to the setup file fixes the server address (users cannot change it)
+  IfFileExists "$EXEDIR\server.toml" 0 +2
+    CopyFiles /SILENT "$EXEDIR\server.toml" "$INSTDIR\server.toml"
   CreateDirectory "$SMPROGRAMS\NetBridge"
   CreateShortcut "$SMPROGRAMS\NetBridge\NetBridge 자료전송.lnk" "$INSTDIR\netbridge.exe"
   CreateShortcut "$SMPROGRAMS\NetBridge\NetBridge 제거.lnk" "$INSTDIR\uninstall.exe"
@@ -88,6 +91,7 @@ Section "Uninstall"
   Delete "$INSTDIR\OFL.txt"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\ca.pem"
+  Delete "$INSTDIR\server.toml"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\NetBridge\*.lnk"

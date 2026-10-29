@@ -54,9 +54,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         section_title(ui, "비밀번호 변경");
         password_form(app, ui);
     });
+    let admin = app.me.as_ref().is_some_and(|m| m.role == Role::Admin);
+    if !admin {
+        ui.add_space(10.0);
+        card(ui, |ui| {
+            section_title(ui, "프로그램");
+            kv_grid(ui, "ver", &[("버전", env!("CARGO_PKG_VERSION").to_string())]);
+            if ui.add(secondary("프로그램 정보")).clicked() {
+                app.about = true;
+            }
+        });
+        return;
+    }
     ui.add_space(10.0);
     card(ui, |ui| {
-        section_title(ui, "연결 정보");
+        section_title(ui, "연결 정보 (관리자에게만 보입니다)");
         let me = app.me.as_ref();
         kv_grid(
             ui,
@@ -70,9 +82,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ],
         );
         ui.add_space(4.0);
-        if ui.add(secondary("프로그램 정보")).clicked() {
-            app.about = true;
-        }
+        ui.horizontal(|ui| {
+            if app.managed {
+                ui.label(muted("서버 주소는 설치 폴더의 server.toml로 배포되어 이 화면에서 바꿀 수 없습니다."));
+            } else if ui.add(secondary("서버 주소 변경")).on_hover_text("로그아웃한 뒤 연결 설정 화면을 엽니다").clicked() {
+                app.change_server();
+            }
+            if ui.add(secondary("프로그램 정보")).clicked() {
+                app.about = true;
+            }
+        });
     });
 }
 

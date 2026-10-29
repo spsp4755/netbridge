@@ -1,4 +1,4 @@
-use crate::app::{App, Phase};
+use crate::app::App;
 use crate::ui::*;
 use eframe::egui::{self, Color32, RichText};
 use netbridge_clientcore::config::config_dir;
@@ -110,13 +110,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.horizontal(|ui| {
-                ui.label(muted(app.cfg.server_url.clone()));
-                ui.add_space(4.0);
-                if ui.add(secondary("서버 설정 변경").min_size(egui::vec2(0.0, 28.0))).clicked() {
-                    app.phase = Phase::Setup;
-                }
-            });
+            ui.label(RichText::new("계정이나 접속 문제는 시스템 관리자에게 문의하세요.").small().color(MUTED));
         });
     });
 }
