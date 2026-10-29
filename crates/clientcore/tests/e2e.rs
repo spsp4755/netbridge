@@ -21,10 +21,7 @@ impl Env {
         self.dir.path().join("certs/ca.pem")
     }
     fn net(&self, side: Side) -> Arc<Net> {
-        let port = match side {
-            NetId::external() => self.ext.app_addr.port(),
-            NetId::internal() => self.int.app_addr.port(),
-        };
+        let port = if side == NetId::external() { self.ext.app_addr.port() } else { self.int.app_addr.port() };
         Arc::new(Net::new(&format!("https://127.0.0.1:{port}"), &self.ca()).unwrap())
     }
     async fn wait_linked(&self) {
@@ -39,7 +36,7 @@ impl Env {
     fn user(&self, username: &str, role: Role, approver: Option<i64>) -> i64 {
         let core = self.int.core.as_ref().unwrap();
         let id = core
-            .create_user(&UserInput { id: None, username: username.into(), name: format!("{username} 님"), dept_id: None, role, approver_id: approver, password: Some(PW.into()) })
+            .create_user(&UserInput { id: None, username: username.into(), name: format!("{username} 님"), dept_id: None, role, approver_id: approver, password: Some(PW.into()), networks: vec![] })
             .unwrap();
         core.clear_must_change(id).unwrap();
         id
@@ -103,9 +100,9 @@ async fn next_event(rx: &mut mpsc::UnboundedReceiver<NetEvent>, pred: impl Fn(&N
     }
 }
 
-async fn send_file(net: &Net, path: &Path) -> Result<TransferInfo, ApiError> {
+async fn send_file(net: &Net, to: NetId, path: &Path) -> Result<TransferInfo, ApiError> {
     let meta = FileMeta { name: path.file_name().unwrap().to_string_lossy().into(), size: std::fs::metadata(path).unwrap().len(), sha256: sha256_file(path).unwrap() };
-    let id = match net.call(ApiRequest::CreateTransfers { files: vec![meta], reason: "업무".into() }).await? {
+    let id = match net.call(ApiRequest::CreateTransfers { to, files: vec![meta], reason: "업무".into() }).await? {
         ApiResponse::Ids(v) => v[0],
         r => panic!("{r:?}"),
     };
@@ -158,7 +155,7 @@ async fn full_flow_pre_approval() {
     let src = e.dir.path().join("보고서.txt");
     let body: Vec<u8> = (0..3_000_000u32).map(|i| b"abcdefghij"[(i % 10) as usize]).collect();
     std::fs::write(&src, &body).unwrap();
-    let t = send_file(&a_ext, &src).await.unwrap();
+    let t = send_file(&a_ext, NetId::internal(), &src).await.unwrap();
     assert_eq!(t.state, TransferState::Pending);
     assert!(incoming(&a_int).await.is_empty());
 
@@ -189,12 +186,15 @@ async fn full_flow_pre_approval() {
 async fn post_approval_flow_internal_to_external() {
     let e = env().await;
     let (a_ext, a_int, _b, ikey) = setup(&e).await;
-    e.int.core.as_ref().unwrap().db.set_setting("approval_rules", r#"[{"order":0,"direction":null,"max_size":null,"exts":[],"dept_id":null,"mode":"Post"}]"#).unwrap();
+    let core = e.int.core.as_ref().unwrap();
+    let mut p = core.route_policy(&Route::new(NetId::internal(), NetId::external())).unwrap();
+    p.approval_rules = vec![ApprovalRule { order: 0, max_size: None, exts: vec![], dept_id: None, mode: ApprovalMode::Post }];
+    core.set_route_policy(&p).unwrap();
     login(&a_int, "a", Some(ikey)).await;
     login(&a_ext, "a", None).await;
     let src = e.dir.path().join("out.csv");
     std::fs::write(&src, "a,b\n1,2\n").unwrap();
-    let t = send_file(&a_int, &src).await.unwrap();
+    let t = send_file(&a_int, NetId::external(), &src).await.unwrap();
     assert_eq!((t.state, t.mode), (TransferState::Available, Some(ApprovalMode::Post)));
     let inc = incoming(&a_ext).await;
     let saved = a_ext.download(&inc[0], e.dir.path(), |_| {}).await.unwrap();
@@ -208,7 +208,7 @@ async fn clipboard_external_to_internal() {
     let mut ev = events(&a_int, &ikey);
     next_event(&mut ev, |x| matches!(x, NetEvent::Connected)).await;
     login(&a_ext, "a", None).await;
-    a_ext.call(ApiRequest::Clipboard { text: "복사한 내용".into() }).await.unwrap();
+    a_ext.call(ApiRequest::Clipboard { to: NetId::internal(), text: "복사한 내용".into() }).await.unwrap();
     match next_event(&mut ev, |x| matches!(x, NetEvent::Event(Event::Clipboard { .. }))).await {
         NetEvent::Event(Event::Clipboard { text, .. }) => assert_eq!(text, "복사한 내용"),
         _ => unreachable!(),
@@ -223,7 +223,7 @@ async fn pii_block_e2e() {
     login(&a_ext, "a", None).await;
     let src = e.dir.path().join("cards.txt");
     std::fs::write(&src, "카드 4111-1111-1111-1111").unwrap();
-    let t = send_file(&a_ext, &src).await.unwrap();
+    let t = send_file(&a_ext, NetId::internal(), &src).await.unwrap();
     assert_eq!(t.state, TransferState::Blocked);
 }
 
