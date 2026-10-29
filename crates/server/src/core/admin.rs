@@ -40,6 +40,8 @@ impl Core {
                 check_password_policy(&new, &self.db.policy()?)?;
                 let now = self.clock.now();
                 self.db.with(|db| db.execute("UPDATE users SET pw_hash=?2, pw_changed_at=?3, must_change=1, fail_count=0, locked=0 WHERE id=?1", params![user_id, hash_password(&new), now]))?;
+                // whoever knew the old password must not keep a live session
+                self.end_user_sessions(c, user_id, "관리자가 비밀번호를 초기화했습니다").await?;
                 self.audit(me, "admin", ip, &format!("비밀번호 초기화: 사용자 #{user_id}"));
                 Ok(ApiResponse::Ok)
             }
@@ -52,16 +54,7 @@ impl Core {
                 let dev: Option<i64> =
                     self.db.with(|db| db.query_row("SELECT id FROM devices WHERE user_id=?1 AND side=?2", params![user_id, side.as_str()], |r| r.get(0)).optional())?;
                 // a released (possibly lost) PC must stop receiving tokens and clipboard
-                let sessions: Vec<i64> = self.db.with(|db| {
-                    let mut st = db.prepare("SELECT id FROM sessions WHERE user_id=?1 AND ended_at IS NULL")?;
-                    let v = st.query_map([user_id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                    Ok(v)
-                })?;
-                let username: String = self.db.with(|db| db.query_row("SELECT username FROM users WHERE id=?1", [user_id], |r| r.get(0)))?;
-                for sid in sessions {
-                    let target = Caller { session_id: sid, user_id, username: username.clone(), role: Role::User, side: c.side, ip: c.ip.clone() };
-                    self.logout(&target, "관리자가 PC 등록을 해제했습니다").await?;
-                }
+                self.end_user_sessions(c, user_id, "관리자가 PC 등록을 해제했습니다").await?;
                 if let Some(d) = dev {
                     match side {
                         Side::Internal => self.hub.drop_device(d),
@@ -128,6 +121,21 @@ impl Core {
                 Ok(ApiResponse::Ok)
             }
         }
+    }
+
+    /// Ends every open session of `user_id` the same way a logout does (devices get SessionEnded).
+    async fn end_user_sessions(&self, c: &Caller, user_id: i64, reason: &str) -> Result<(), ApiError> {
+        let sessions: Vec<i64> = self.db.with(|db| {
+            let mut st = db.prepare("SELECT id FROM sessions WHERE user_id=?1 AND ended_at IS NULL")?;
+            let v = st.query_map([user_id], |r| r.get(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(v)
+        })?;
+        let username: String = self.db.with(|db| db.query_row("SELECT username FROM users WHERE id=?1", [user_id], |r| r.get(0)))?;
+        for sid in sessions {
+            let target = Caller { session_id: sid, user_id, username: username.clone(), role: Role::User, side: c.side, ip: c.ip.clone() };
+            self.logout(&target, reason).await?;
+        }
+        Ok(())
     }
 
     fn list_users(&self) -> Result<Vec<UserInfo>, ApiError> {
