@@ -105,6 +105,11 @@ pub fn page_header(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
     ui.add_space(10.0);
 }
 
+/// Dialog window: roomier than the default popup frame.
+pub fn modal_frame() -> egui::Frame {
+    card_frame().inner_margin(Margin::same(24)).corner_radius(CornerRadius::same(12)).shadow(Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(45) })
+}
+
 pub fn card_frame() -> egui::Frame {
     egui::Frame::new().fill(CARD).stroke(Stroke::new(1.0_f32, BORDER)).corner_radius(CornerRadius::same(10)).inner_margin(Margin::same(16)).shadow(Shadow {
         offset: [0, 1],

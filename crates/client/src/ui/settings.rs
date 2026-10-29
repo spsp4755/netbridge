@@ -161,7 +161,7 @@ fn password_form(app: &mut App, ui: &mut egui::Ui) {
 }
 
 pub fn forced_password_modal(app: &mut App, ctx: &egui::Context) {
-    egui::Modal::new(egui::Id::new("forcepw")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::new("forcepw")).frame(modal_frame()).show(ctx, |ui| {
         ui.set_width(440.0);
         ui.label(bold("비밀번호를 바꿔 주세요", 19.0));
         ui.label(muted("처음 로그인했거나 비밀번호 사용 기간이 지났습니다. 바꾸기 전에는 다른 기능을 쓸 수 없습니다."));

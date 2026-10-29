@@ -104,7 +104,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         });
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add_enabled(!app.send.busy, egui::Button::new("✕").frame(false)).on_hover_text("목록에서 빼기").clicked() {
+                        if ui.add_enabled(!app.send.busy, egui::Button::new("🗙").frame(false)).on_hover_text("목록에서 빼기").clicked() {
                             remove = Some(i);
                         }
                         if let Some((done, total)) = progress.get(p).filter(|(_, t)| *t > 0) {
@@ -187,7 +187,7 @@ pub fn reason_modal(app: &mut App, ctx: &egui::Context) {
         return;
     };
     let mut keep = true;
-    egui::Modal::new(egui::Id::new("reason")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::new("reason")).frame(modal_frame()).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(bold("결재 요청", 19.0));
         ui.add_space(4.0);
@@ -279,7 +279,11 @@ fn start(app: &mut App) {
                     if all_ok {
                         a.send.files.clear();
                         a.send.reason.clear();
-                        a.toast("파일을 보냈습니다");
+                        if a.send.results.iter().any(|(_, r)| matches!(r, Ok(t) if t.state == TransferState::AwaitingReason)) {
+                            a.notify("개인정보가 탐지된 파일이 있습니다. 사유를 입력해 결재를 요청하세요", Tone::Warn, 8);
+                        } else {
+                            a.toast("파일을 보냈습니다");
+                        }
                     }
                 }
                 Err(e) => a.toast_err(e),

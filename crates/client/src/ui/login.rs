@@ -156,7 +156,7 @@ fn submit(app: &mut App) {
 
 /// Idle lock: the session stays open; only this window is locked.
 pub fn lock_modal(app: &mut App, ctx: &egui::Context) {
-    egui::Modal::new(egui::Id::new("lock")).show(ctx, |ui| {
+    egui::Modal::new(egui::Id::new("lock")).frame(modal_frame()).show(ctx, |ui| {
         ui.set_width(360.0);
         ui.label(bold("🔒 화면 잠금", 19.0));
         ui.label(muted("일정 시간 사용하지 않아 화면을 잠갔습니다. 로그인은 유지됩니다. 비밀번호를 입력하세요."));

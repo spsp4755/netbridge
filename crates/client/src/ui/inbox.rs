@@ -68,6 +68,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut download = None;
     card(ui, |ui| {
         TableBuilder::new(ui)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .striped(true)
             .column(Column::auto().at_least(120.0))
             .column(Column::remainder().at_least(180.0).clip(true))

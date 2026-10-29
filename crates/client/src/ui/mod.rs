@@ -15,7 +15,8 @@ use netbridge_proto::*;
 pub fn fmt_bytes(b: u64) -> String {
     const K: f64 = 1024.0;
     let f = b as f64;
-    if f >= K * K * K {
+    // 1000 MB and up reads as GB so a value just under 1 GB never shows as "1024.0 MB"
+    if f >= 1000.0 * K * K {
         format!("{:.2} GB", f / (K * K * K))
     } else if f >= K * K {
         format!("{:.1} MB", f / (K * K))
@@ -103,6 +104,7 @@ mod tests {
     fn helpers() {
         assert_eq!(fmt_bytes(1536), "2 KB");
         assert_eq!(fmt_bytes(5 * MIB), "5.0 MB");
+        assert_eq!(fmt_bytes(1024 * MIB - 98), "1.00 GB");
         assert_eq!(text_to_exts(".EXE, dll;  bat"), vec!["exe", "dll", "bat"]);
         assert_eq!(fmt_ts(1_800_000_000), "2027-01-15 17:00");
     }

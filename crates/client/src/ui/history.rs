@@ -54,74 +54,77 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     let mut ask = None;
     card(ui, |ui| {
-        TableBuilder::new(ui)
-            .striped(true)
-            .column(Column::auto().at_least(115.0))
-            .column(Column::auto().at_least(120.0))
-            .column(Column::remainder().at_least(220.0).clip(true))
-            .column(Column::auto().at_least(65.0))
-            .column(Column::auto().at_least(75.0))
-            .column(Column::auto().at_least(190.0))
-            .column(Column::auto().at_least(95.0))
-            .column(Column::auto().at_least(95.0))
-            .column(Column::auto().at_least(120.0))
-            .header(28.0, |mut h| {
-                for c in ["보낸 시각", "방향", "파일", "크기", "상태", "결재", "송신 IP", "수신 IP", "개인정보"] {
-                    h.col(|ui| {
-                        ui.label(muted(c));
-                    });
-                }
-            })
-            .body(|mut body| {
-                for t in &app.outgoing.items {
-                    body.row(34.0, |mut row| {
-                        row.col(|ui| {
-                            ui.label(fmt_ts(t.created_at));
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            TableBuilder::new(ui)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .striped(true)
+                .column(Column::auto().at_least(110.0))
+                .column(Column::auto().at_least(100.0))
+                .column(Column::remainder().at_least(150.0).clip(true))
+                .column(Column::auto().at_least(55.0))
+                .column(Column::auto().at_least(70.0))
+                .column(Column::auto().at_least(140.0))
+                .column(Column::auto().at_least(75.0))
+                .column(Column::auto().at_least(75.0))
+                .column(Column::auto().at_least(80.0))
+                .header(28.0, |mut h| {
+                    for c in ["보낸 시각", "방향", "파일", "크기", "상태", "결재", "송신 IP", "수신 IP", "개인정보"] {
+                        h.col(|ui| {
+                            ui.label(muted(c));
                         });
-                        row.col(|ui| {
-                            ui.label(t.direction.label());
-                        });
-                        row.col(|ui| {
-                            let mut tip = format!("사유: {}\nSHA-256: {}", t.reason, t.sha256);
-                            if let Some(c) = t.approval.as_ref().and_then(|a| a.comment.clone()) {
-                                tip.push_str(&format!("\n결재 의견: {c}"));
-                            }
-                            if let Some(b) = &t.block_reason {
-                                tip.push_str(&format!("\n{b}"));
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label(bold(&t.file_name, 14.0)).on_hover_text(tip);
-                                if t.state == TransferState::AwaitingReason && ui.add(primary("결재 요청").min_size(egui::vec2(0.0, 26.0))).clicked() {
-                                    ask = Some((t.id, t.file_name.clone()));
+                    }
+                })
+                .body(|mut body| {
+                    for t in &app.outgoing.items {
+                        body.row(34.0, |mut row| {
+                            row.col(|ui| {
+                                ui.label(fmt_ts(t.created_at));
+                            });
+                            row.col(|ui| {
+                                ui.label(t.direction.label());
+                            });
+                            row.col(|ui| {
+                                let mut tip = format!("사유: {}\nSHA-256: {}", t.reason, t.sha256);
+                                if let Some(c) = t.approval.as_ref().and_then(|a| a.comment.clone()) {
+                                    tip.push_str(&format!("\n결재 의견: {c}"));
+                                }
+                                if let Some(b) = &t.block_reason {
+                                    tip.push_str(&format!("\n{b}"));
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label(bold(&t.file_name, 14.0)).on_hover_text(tip);
+                                    if t.state == TransferState::AwaitingReason && ui.add(primary("결재 요청").min_size(egui::vec2(0.0, 26.0))).clicked() {
+                                        ask = Some((t.id, t.file_name.clone()));
+                                    }
+                                });
+                            });
+                            row.col(|ui| {
+                                ui.label(fmt_bytes(t.size));
+                            });
+                            row.col(|ui| {
+                                state_pill(ui, t.state);
+                            });
+                            row.col(|ui| {
+                                ui.label(approval_text(&t.approval));
+                            });
+                            row.col(|ui| {
+                                ui.label(&t.sender_ip);
+                            });
+                            row.col(|ui| {
+                                ui.label(t.receiver_ip.clone().unwrap_or_else(|| "-".into()));
+                            });
+                            row.col(|ui| {
+                                let s = pii_summary(&t.pii, t.unscannable);
+                                if s == "-" {
+                                    ui.label(muted("없음"));
+                                } else {
+                                    ui.label(RichText::new(s).color(DANGER));
                                 }
                             });
                         });
-                        row.col(|ui| {
-                            ui.label(fmt_bytes(t.size));
-                        });
-                        row.col(|ui| {
-                            state_pill(ui, t.state);
-                        });
-                        row.col(|ui| {
-                            ui.label(approval_text(&t.approval));
-                        });
-                        row.col(|ui| {
-                            ui.label(&t.sender_ip);
-                        });
-                        row.col(|ui| {
-                            ui.label(t.receiver_ip.clone().unwrap_or_else(|| "-".into()));
-                        });
-                        row.col(|ui| {
-                            let s = pii_summary(&t.pii, t.unscannable);
-                            if s == "-" {
-                                ui.label(muted("없음"));
-                            } else {
-                                ui.label(RichText::new(s).color(DANGER));
-                            }
-                        });
-                    });
-                }
-            })
+                    }
+                })
+        })
     });
     if let Some((id, name)) = ask {
         app.send.reason_for = Some((id, name, String::new()));

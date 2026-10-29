@@ -621,7 +621,7 @@ impl App {
         if !self.about {
             return;
         }
-        let r = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
+        let r = egui::Modal::new(egui::Id::new("about")).frame(theme::modal_frame()).show(ctx, |ui| {
             ui.set_width(440.0);
             ui.horizontal(|ui| {
                 ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(44.0, 44.0)));
