@@ -43,8 +43,8 @@ impl Core {
         let role = role_str(u.role);
         self.db.with(|c| {
             c.execute(
-                "INSERT INTO users(username,name,dept_id,role,approver_id,pw_hash,pw_changed_at,must_change) VALUES(?1,?2,?3,?4,?5,?6,?7,1)",
-                params![username, u.name.trim(), u.dept_id, role, u.approver_id, hash, now],
+                "INSERT INTO users(username,name,dept_id,role,approver_id,pw_hash,pw_changed_at,must_change,networks) VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)",
+                params![username, u.name.trim(), u.dept_id, role, u.approver_id, hash, now, serde_json::to_string(&u.networks).unwrap_or_else(|_| "[]".into())],
             )?;
             Ok(c.last_insert_rowid())
         })
@@ -84,22 +84,27 @@ impl Core {
         }
         self.db.with(|c| c.execute("UPDATE users SET fail_count=0 WHERE id=?1", [uid]))?;
 
-        let key = self.bind_device(uid, ctx.side, device_key)?;
+        let nets = self.user_networks(uid)?;
+        if !nets.contains(&ctx.side) {
+            return Err(ApiError::new(ErrorCode::Forbidden, format!("이 계정은 {}에서 사용할 수 없습니다", self.topo.name(&ctx.side))));
+        }
+        let key = self.bind_device(uid, &ctx.side, device_key)?;
         let (session_id, token, created) = self.open_session(uid)?;
-        let caller = Caller { session_id, user_id: uid, username: username.trim().to_string(), role: Role::User, side: ctx.side, ip: ctx.client_ip.clone() };
+        let caller = Caller { session_id, user_id: uid, username: username.trim().to_string(), role: Role::User, side: ctx.side.clone(), ip: ctx.client_ip.clone() };
         let me = self.me(&caller)?;
         if created {
-            if let Some((side, dev)) = self.devices_of(uid)?.into_iter().find(|(s, _)| *s != ctx.side) {
-                let peer_me = Me { side, client_ip: String::new(), ..me.clone() };
-                self.push(side, dev, Event::SessionStarted { token: token.clone(), me: peer_me }).await;
+            // one login opens the session on every network the user may use
+            for (side, dev) in self.devices_of(uid)?.into_iter().filter(|(s, _)| *s != ctx.side && nets.contains(s)) {
+                let peer_me = self.me(&Caller { side: side.clone(), ip: String::new(), ..caller.clone() })?;
+                self.push(&side, dev, Event::SessionStarted { token: token.clone(), me: peer_me }).await;
             }
         }
-        self.audit(user, "login", Some(&ctx.client_ip), &format!("{} 로그인", ctx.side.label()));
+        self.audit(user, "login", Some(&ctx.client_ip), &format!("{} 로그인", self.topo.name(&ctx.side)));
         Ok(ApiResponse::LoggedIn { token, device_key: key, me })
     }
 
     /// Registers this PC for the user on first login; afterwards the stored key must match.
-    fn bind_device(&self, uid: i64, side: Side, key: Option<&str>) -> Result<String, ApiError> {
+    fn bind_device(&self, uid: i64, side: &NetId, key: Option<&str>) -> Result<String, ApiError> {
         let existing = self.db.with(|c| {
             c.query_row("SELECT key_hash FROM devices WHERE user_id=?1 AND side=?2", params![uid, side.as_str()], |r| r.get::<_, String>(0)).optional()
         })?;
@@ -159,10 +164,12 @@ impl Core {
             name,
             dept,
             role: parse_role(&role),
-            side: c.side,
+            side: c.side.clone(),
             client_ip: c.ip.clone(),
             policy,
             must_change_password: must || expired,
+            networks: self.user_networks(c.user_id)?,
+            routes: self.routes_for(c.user_id, &c.side)?,
         })
     }
 }

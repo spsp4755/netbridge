@@ -4,7 +4,7 @@ use netbridge_proto::*;
 use rusqlite::{params, OptionalExtension};
 
 /// A device authenticated by its key, before any user login.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRef {
     pub device_id: i64,
     pub user_id: i64,
@@ -23,7 +23,7 @@ impl Core {
             })
             .ok()
             .flatten()
-            .and_then(|(device_id, user_id, s)| Side::parse(&s).map(|side| DeviceRef { device_id, user_id, side }))
+            .map(|(device_id, user_id, s)| DeviceRef { device_id, user_id, side: NetId(s) })
     }
 
     /// Returns (session id, token, newly created). An open session is reused so both PCs share it.
@@ -83,7 +83,7 @@ impl Core {
         }
         let now = self.clock.now();
         let max = self.db.policy()?.session_max_minutes;
-        let caller = Caller { session_id: sid, user_id: uid, username, role: parse_role(&role), side: ctx.side, ip: ctx.client_ip.clone() };
+        let caller = Caller { session_id: sid, user_id: uid, username, role: parse_role(&role), side: ctx.side.clone(), ip: ctx.client_ip.clone() };
         if locked || max.is_some_and(|m| now - created > m as i64 * 60) {
             let reason = if locked { "계정 잠김" } else { "최대 유지 시간 초과" };
             self.logout(&caller, reason).await?;

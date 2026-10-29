@@ -1,6 +1,6 @@
 use crate::certs;
-use crate::config::ServerConfig;
-use crate::core::Core;
+use crate::config::{Role, ServerConfig};
+use crate::core::{Core, Peer};
 use crate::db::Db;
 use crate::files::Files;
 use crate::http::{app_router, Backend};
@@ -8,7 +8,8 @@ use crate::hub::Hub;
 use crate::link::{run_link_client, LinkHub, LinkPeer};
 use crate::relay::{link_router, Relay};
 use axum::Router;
-use netbridge_proto::Side;
+use netbridge_proto::NetId;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,17 +52,25 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
     certs::install_crypto();
     std::fs::create_dir_all(&cfg.data_dir)?;
     let app_tls = certs::server_tls(&cfg.tls_cert, &cfg.tls_key)?;
-    match cfg.side {
-        Side::Internal => {
-            let link = &cfg.link;
-            let (cc, ck) = (link.client_cert.as_ref().unwrap(), link.client_key.as_ref().unwrap());
-            let base = link.external_url.clone().unwrap();
-            let peer = LinkPeer::new(&base, certs::client_tls(&cfg.ca_cert, Some((cc, ck)))?)?;
+    let client_tls = |cfg: &ServerConfig| -> anyhow::Result<rustls::ClientConfig> {
+        let (cc, ck) = (cfg.client_cert.as_ref().unwrap(), cfg.client_key.as_ref().unwrap());
+        certs::client_tls(&cfg.ca_cert, Some((cc, ck)))
+    };
+    match cfg.role {
+        Role::Hub => {
+            let mut peers: HashMap<NetId, Arc<dyn Peer>> = HashMap::new();
+            for l in &cfg.links {
+                peers.insert(l.network.clone(), Arc::new(LinkPeer::new(&l.url, client_tls(&cfg)?)?));
+            }
             let db = Db::open(&cfg.db_path())?;
-            let core = Arc::new(Core::new(db, cfg.data_dir.clone(), Arc::new(peer))?);
-            let ws_url = format!("{}/link/ws", base.trim_end_matches('/').replacen("https://", "wss://", 1));
-            let link_tls = Arc::new(certs::client_tls(&cfg.ca_cert, Some((cc, ck)))?);
-            let mut tasks = vec![tokio::spawn(run_link_client(core.clone(), ws_url, link_tls))];
+            let topo = cfg.topology.clone().expect("hub topology");
+            let core = Arc::new(Core::new(db, cfg.data_dir.clone(), cfg.network.clone(), topo, peers)?);
+            let link_tls = Arc::new(client_tls(&cfg)?);
+            let mut tasks = vec![];
+            for l in &cfg.links {
+                let ws_url = format!("{}/link/ws", l.url.trim_end_matches('/').replacen("https://", "wss://", 1));
+                tasks.push(tokio::spawn(run_link_client(core.clone(), l.network.clone(), ws_url, link_tls.clone())));
+            }
             let sweeper = core.clone();
             tasks.push(tokio::spawn(async move {
                 let mut t = tokio::time::interval(Duration::from_secs(60));
@@ -72,16 +81,27 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
             }));
             let backend: Arc<dyn Backend> = core.clone();
             let (app_addr, h) = serve(cfg.listen, app_tls, app_router(backend))?;
-            tracing::info!("internal server listening on {app_addr}, linking to {base}");
+            tracing::info!("central server ({}) listening on {app_addr}, linking to {} network(s)", cfg.network, cfg.links.len());
             Ok(Running { app_addr, link_addr: None, core: Some(core), relay: None, handles: vec![h], tasks })
         }
-        Side::External => {
-            let relay = Arc::new(Relay { link: Arc::new(LinkHub::default()), files: Files::new(cfg.data_dir.join("files"))?, hub: Hub::default() });
+        Role::Node => {
+            let mut neighbors = HashMap::new();
+            for n in &cfg.neighbors {
+                neighbors.insert(n.network.clone(), LinkPeer::new(&n.url, client_tls(&cfg)?)?);
+            }
+            let relay = Arc::new(Relay {
+                net: cfg.network.clone(),
+                link: Arc::new(LinkHub::default()),
+                files: Files::new(cfg.data_dir.join("files"))?,
+                hub: Hub::default(),
+                neighbors,
+                topo: Default::default(),
+            });
             let link_tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert)?;
-            let (link_addr, h1) = serve(cfg.link.listen.unwrap(), link_tls, link_router(relay.clone()))?;
+            let (link_addr, h1) = serve(cfg.link_listen.unwrap(), link_tls, link_router(relay.clone()))?;
             let backend: Arc<dyn Backend> = relay.clone();
             let (app_addr, h2) = serve(cfg.listen, app_tls, app_router(backend))?;
-            tracing::info!("external server listening on {app_addr}, link on {link_addr}");
+            tracing::info!("network {} server listening on {app_addr}, link on {link_addr}", cfg.network);
             Ok(Running { app_addr, link_addr: Some(link_addr), core: None, relay: Some(relay), handles: vec![h1, h2], tasks: vec![] })
         }
     }

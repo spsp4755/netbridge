@@ -3,7 +3,6 @@ use crate::config::ServerConfig;
 use crate::core::{kst, to_kst};
 use anyhow::{ensure, Context, Result};
 use chrono::TimeZone;
-use netbridge_proto::Side;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,7 +10,7 @@ use std::time::Duration;
 /// Consistent copy of the live database (`VACUUM INTO`), safe while the server runs.
 /// Default target: `<data_dir>/backup/netbridge-YYYYMMDD-HHMMSS.db` (KST). Never overwrites.
 pub fn backup(cfg: &ServerConfig, out: Option<&Path>) -> Result<PathBuf> {
-    ensure!(cfg.side == Side::Internal, "백업할 DB는 내부 연계서버에만 있습니다");
+    ensure!(cfg.is_hub(), "백업할 DB는 중앙 연계서버에만 있습니다");
     let db = cfg.db_path();
     ensure!(db.exists(), "DB 파일이 없습니다: {}", db.display());
     let out = match out {
@@ -36,18 +35,18 @@ fn file_state(p: &Path) -> &'static str {
 pub fn status(cfg: &ServerConfig) -> Result<String> {
     let mut s = String::new();
     writeln!(s, "NetBridge 연계서버 {}", env!("CARGO_PKG_VERSION"))?;
-    writeln!(s, "구분: {}", cfg.side.label())?;
+    writeln!(s, "구분: {} (망 {})", if cfg.is_hub() { "중앙 서버" } else { "망 서버" }, cfg.network)?;
     writeln!(s, "앱 접속 주소: {}", cfg.listen)?;
     writeln!(s, "데이터 폴더: {}", cfg.data_dir.display())?;
     writeln!(s, "로그 폴더: {} ({}일 보관)", cfg.log_dir.display(), cfg.log_keep_days)?;
     let mut files = vec![("서버 인증서", &cfg.tls_cert), ("서버 키", &cfg.tls_key), ("CA 인증서", &cfg.ca_cert)];
-    files.extend(cfg.link.client_cert.iter().map(|p| ("연계 인증서", p)));
-    files.extend(cfg.link.client_key.iter().map(|p| ("연계 키", p)));
+    files.extend(cfg.client_cert.iter().map(|p| ("연계 인증서", p)));
+    files.extend(cfg.client_key.iter().map(|p| ("연계 키", p)));
     for (label, p) in files {
         writeln!(s, "{label}: {} ({})", p.display(), file_state(p))?;
     }
-    match cfg.side {
-        Side::Internal => {
+    match cfg.is_hub() {
+        true => {
             let db = cfg.db_path();
             if db.exists() {
                 let c = rusqlite::Connection::open(&db)?;
@@ -62,11 +61,15 @@ pub fn status(cfg: &ServerConfig) -> Result<String> {
             } else {
                 writeln!(s, "DB: {} (없음 — 서버를 한 번 실행하면 만들어집니다)", db.display())?;
             }
-            let url = cfg.link.external_url.as_deref().unwrap_or_default();
-            writeln!(s, "외부 서버 연계 주소: {url} ({})", probe(url))?;
+            for l in &cfg.links {
+                writeln!(s, "망 {} 연계 주소: {} ({})", l.network, l.url, probe(&l.url))?;
+            }
         }
-        Side::External => {
-            writeln!(s, "연계 구간 주소: {}", cfg.link.listen.map(|a| a.to_string()).unwrap_or_default())?;
+        false => {
+            writeln!(s, "연계 구간 주소: {}", cfg.link_listen.map(|a| a.to_string()).unwrap_or_default())?;
+            for n in &cfg.neighbors {
+                writeln!(s, "이웃 망 {} 연계 주소: {} ({})", n.network, n.url, probe(&n.url))?;
+            }
         }
     }
     Ok(s)

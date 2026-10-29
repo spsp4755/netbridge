@@ -5,14 +5,13 @@ use netbridge_proto::*;
 use rusqlite::{params, OptionalExtension};
 
 /// First rule (by `order`) whose conditions all match; Pre when none does.
-pub fn pick_mode(rules: &[ApprovalRule], direction: Direction, size: u64, ext: &str, dept_id: Option<i64>) -> ApprovalMode {
+pub fn pick_mode(rules: &[ApprovalRule], size: u64, ext: &str, dept_id: Option<i64>) -> ApprovalMode {
     let mut sorted: Vec<&ApprovalRule> = rules.iter().collect();
     sorted.sort_by_key(|r| r.order);
     sorted
         .into_iter()
         .find(|r| {
-            r.direction.is_none_or(|d| d == direction)
-                && r.max_size.is_none_or(|m| size <= m)
+            r.max_size.is_none_or(|m| size <= m)
                 && (r.exts.is_empty() || r.exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
                 && r.dept_id.is_none_or(|d| Some(d) == dept_id)
         })
@@ -43,10 +42,12 @@ impl Core {
 
     /// Applies PII action and approval rules to a completed upload.
     pub(super) async fn route_transfer(&self, id: i64, scan: &ScanResult) -> Result<(), ApiError> {
-        let policy = self.db.policy()?;
+        let global = self.db.policy()?;
         let t = self.transfer_info(id)?;
         let owner = self.transfer_owner(id)?;
-        let action = netbridge_pii::decide(&scan.hits, scan.unscannable, &policy.pii_rules, policy.pii_unscannable_action);
+        let route = self.route_policy(&t.route)?;
+        let rules = route.effective_pii(&global.pii_rules);
+        let action = netbridge_pii::decide(&scan.hits, scan.unscannable, &rules, route.unscannable_action);
         if action == Some(PiiAction::Block) {
             let mut items: Vec<String> = scan.hits.iter().map(|h| format!("{} {}건", h.name, h.count)).collect();
             if scan.unscannable {
@@ -54,7 +55,7 @@ impl Core {
             }
             let reason = format!("개인정보 탐지로 차단: {}", items.join(", "));
             self.db.with(|c| c.execute("UPDATE transfers SET state='Blocked', block_reason=?2 WHERE id=?1", params![id, reason]))?;
-            self.remove_at(t.direction.from_side(), id).await;
+            self.remove_at(&t.route.from, id).await;
             self.audit(Some((owner, &t.owner)), "transfer_blocked", Some(&t.sender_ip), &format!("#{id} {reason}"));
             self.push_user(owner, Event::TransferUpdated { transfer: self.transfer_info(id)? }).await;
             return Ok(());
@@ -64,9 +65,9 @@ impl Core {
         let mode = if action == Some(PiiAction::ForcePre) || restricted {
             ApprovalMode::Pre
         } else {
-            pick_mode(&self.db.approval_rules()?, t.direction, t.size, &ext_of(&t.file_name), dept)
+            pick_mode(&route.approval_rules, t.size, &ext_of(&t.file_name), dept)
         };
-        let pii_forced = netbridge_pii::decide(&scan.hits, false, &policy.pii_rules, policy.pii_unscannable_action) == Some(PiiAction::ForcePre);
+        let pii_forced = netbridge_pii::decide(&scan.hits, false, &rules, route.unscannable_action) == Some(PiiAction::ForcePre);
         if mode == ApprovalMode::Pre && pii_forced && t.reason.trim().is_empty() {
             // the approver needs to know why personal data is leaving; ask the sender first
             self.db.with(|c| c.execute("UPDATE transfers SET state='AwaitingReason', mode='Pre' WHERE id=?1", [id]))?;
@@ -125,15 +126,6 @@ impl Core {
         }
     }
 
-    async fn remove_at(&self, side: Side, id: i64) {
-        match side {
-            Side::Internal => self.files.remove(id),
-            Side::External => {
-                let _ = self.peer.delete_file(id).await;
-            }
-        }
-    }
-
     /// Moves the payload to the receiving network and makes it available.
     /// Moves the payload to the receiving network. Only the caller that claims the Pending row runs;
     /// a concurrent call (approval, post-approval, sweep retry) returns Ok without doing anything.
@@ -152,30 +144,33 @@ impl Core {
         Ok(())
     }
 
+    /// Moves the payload along its route: pulled to the central server, pushed from it,
+    /// or sent node to node over their own link so it never passes through a third network.
     async fn copy_to_receiver(&self, id: i64) -> Result<(), ApiError> {
         let t = self.transfer_info(id)?;
-        match t.direction {
-            Direction::ToInternal => {
-                let tmp = self.files.path(id).with_extension("part");
-                self.peer.fetch_file(id, &tmp).await?;
-                let got = {
-                    use sha2::Digest;
-                    let mut h = sha2::Sha256::new();
-                    let mut f = std::fs::File::open(&tmp).map_err(ApiError::internal)?;
-                    std::io::copy(&mut f, &mut h).map_err(ApiError::internal)?;
-                    hex::encode(h.finalize())
-                };
-                if got != t.sha256 {
-                    let _ = std::fs::remove_file(&tmp);
-                    return Err(ApiError::internal("연계 구간에서 받은 파일의 해시가 다릅니다"));
-                }
-                std::fs::rename(&tmp, self.files.path(id)).map_err(ApiError::internal)?;
-                let _ = self.peer.delete_file(id).await;
+        let (from, to) = (&t.route.from, &t.route.to);
+        if self.is_local(to) {
+            let tmp = self.files.path(id).with_extension("part");
+            self.peer(from)?.fetch_file(id, &tmp).await?;
+            let got = {
+                use sha2::Digest;
+                let mut h = sha2::Sha256::new();
+                let mut f = std::fs::File::open(&tmp).map_err(ApiError::internal)?;
+                std::io::copy(&mut f, &mut h).map_err(ApiError::internal)?;
+                hex::encode(h.finalize())
+            };
+            if got != t.sha256 {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(ApiError::internal("연계 구간에서 받은 파일의 해시가 다릅니다"));
             }
-            Direction::ToExternal => {
-                self.peer.push_file(id, &self.files.path(id)).await?;
-                self.files.remove(id);
-            }
+            std::fs::rename(&tmp, self.files.path(id)).map_err(ApiError::internal)?;
+            let _ = self.peer(from)?.delete_file(id).await;
+        } else if self.is_local(from) {
+            self.peer(to)?.push_file(id, &self.files.path(id)).await?;
+            self.files.remove(id);
+        } else {
+            self.peer(from)?.forward(id, to, &t.sha256).await?;
+            let _ = self.peer(from)?.delete_file(id).await;
         }
         Ok(())
     }
@@ -217,7 +212,7 @@ impl Core {
             },
             ("Pre", false) => {
                 self.set_state(tid, TransferState::Rejected)?;
-                self.remove_at(t.direction.from_side(), tid).await;
+                self.remove_at(&t.route.from, tid).await;
             }
             (_, false) => self.notify_admins(&format!("사후결재 반려: {} — {} ({})", t.owner, t.file_name, comment.as_deref().unwrap_or("의견 없음"))).await,
             _ => {}
@@ -331,14 +326,18 @@ impl Core {
         let expired: Vec<(i64, String)> = self
             .db
             .with(|c| {
-                let mut st = c.prepare("SELECT id, direction FROM transfers WHERE created_at<?1 AND state IN ('Uploading','AwaitingReason','Pending','Available','Downloaded')")?;
+                let mut st = c.prepare("SELECT id, from_net FROM transfers WHERE created_at<?1 AND state IN ('Uploading','AwaitingReason','Pending','Available','Downloaded')")?;
                 let v = st.query_map([cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|r| r.ok()).collect();
                 Ok(v)
             })
             .unwrap_or_default();
-        for (id, _) in expired {
+        for (id, from) in expired {
+            // the payload sits on the sender's or the receiver's server; clear both
             self.files.remove(id);
-            let _ = self.peer.delete_file(id).await;
+            for p in self.peers.values() {
+                let _ = p.delete_file(id).await;
+            }
+            let _ = from;
             let _ = self.set_state(id, TransferState::Expired);
         }
         let audit_cutoff = now - policy.audit_retention_days as i64 * 86400;

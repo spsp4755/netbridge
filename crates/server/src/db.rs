@@ -1,4 +1,4 @@
-use netbridge_proto::{ApiError, ApprovalRule, Policy};
+use netbridge_proto::{ApiError, Policy};
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
@@ -52,6 +52,23 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
     if !has_reserved {
         // 1 = an Uploading transfer whose completion has claimed its share of the daily limit
         conn.execute_batch("ALTER TABLE transfers ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0")?;
+    }
+    let has_col = |t: &str, c: &str| -> rusqlite::Result<bool> { conn.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{t}') WHERE name='{c}'"), [], |r| r.get(0)) };
+    if !has_col("transfers", "from_net")? {
+        // 0.4: transfers name their route instead of the two-network direction
+        conn.execute_batch(
+            "ALTER TABLE transfers ADD COLUMN from_net TEXT NOT NULL DEFAULT '';
+             ALTER TABLE transfers ADD COLUMN to_net TEXT NOT NULL DEFAULT '';
+             UPDATE transfers SET from_net='external', to_net='internal' WHERE direction='ToInternal';
+             UPDATE transfers SET from_net='internal', to_net='external' WHERE direction='ToExternal';",
+        )?;
+    }
+    if !has_col("transfers", "threats")? {
+        conn.execute_batch("ALTER TABLE transfers ADD COLUMN threats TEXT NOT NULL DEFAULT '[]'")?;
+    }
+    if !has_col("users", "networks")? {
+        // JSON list of network ids the user may use; '[]' = all
+        conn.execute_batch("ALTER TABLE users ADD COLUMN networks TEXT NOT NULL DEFAULT '[]'")?;
     }
     Ok(())
 }
@@ -111,8 +128,4 @@ impl Db {
         serde_json::from_str(&s).map_err(ApiError::internal)
     }
 
-    pub fn approval_rules(&self) -> Result<Vec<ApprovalRule>, ApiError> {
-        let s = self.setting("approval_rules")?.unwrap_or_else(|| "[]".into());
-        serde_json::from_str(&s).map_err(ApiError::internal)
-    }
 }

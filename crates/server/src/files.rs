@@ -50,17 +50,7 @@ impl Files {
     }
 
     pub fn sha256(&self, id: i64) -> std::io::Result<String> {
-        let mut f = std::fs::File::open(self.path(id))?;
-        let mut h = Sha256::new();
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            h.update(&buf[..n]);
-        }
-        Ok(hex::encode(h.finalize()))
+        sha256_of(&self.path(id))
     }
 
     pub fn read_range(&self, id: i64, start: u64, len: usize) -> std::io::Result<Vec<u8>> {
@@ -75,4 +65,18 @@ impl Files {
     pub fn remove(&self, id: i64) {
         let _ = std::fs::remove_file(self.path(id));
     }
+}
+
+pub fn sha256_of(path: &std::path::Path) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(hex::encode(h.finalize()))
 }

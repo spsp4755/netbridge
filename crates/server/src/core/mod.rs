@@ -5,6 +5,7 @@ mod transfer;
 mod approval;
 mod clipboard;
 mod admin;
+mod routes;
 pub use session::DeviceRef;
 
 pub use approval::pick_mode;
@@ -17,6 +18,7 @@ use crate::hub::Hub;
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, Utc};
 use netbridge_proto::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -36,10 +38,10 @@ pub struct ScanResult {
     pub sha256: String,
 }
 
-/// Operations on the external server, driven by the internal server.
+/// Operations on another network's server, driven by the central server.
 #[async_trait]
 pub trait Peer: Send + Sync {
-    /// Size, hash and PII scan of the external copy of an upload.
+    /// Size, hash and PII scan of that network's copy of an upload.
     async fn scan(&self, id: i64, name: &str, policy: &Policy) -> Result<ScanResult, ApiError>;
     /// Copies the external copy of a transfer into `dest`.
     async fn fetch_file(&self, id: i64, dest: &Path) -> Result<(), ApiError>;
@@ -48,8 +50,10 @@ pub trait Peer: Send + Sync {
     /// True when an external device connection received it.
     async fn push_event(&self, device_id: i64, ev: Event) -> Result<bool, ApiError>;
     async fn online_devices(&self) -> Result<Vec<i64>, ApiError>;
-    /// Closes the external device's live connections (after an admin releases it).
+    /// Closes the device's live connections there (after an admin releases it).
     async fn drop_device(&self, device_id: i64) -> Result<(), ApiError>;
+    /// Sends that network's copy straight to a neighbor network over their own link.
+    async fn forward(&self, id: i64, to: &NetId, sha256: &str) -> Result<(), ApiError>;
 }
 
 pub fn scan_bytes(name: &str, bytes: &[u8], policy: &Policy) -> ScanResult {
@@ -106,13 +110,16 @@ pub fn to_kst(ts: i64) -> DateTime<FixedOffset> {
     DateTime::from_timestamp(ts, 0).unwrap_or_default().with_timezone(&kst())
 }
 
-/// The internal server's business logic. External requests arrive with `side == External`.
+/// The central server's business logic. Requests relayed by other networks' servers arrive with their `side`.
 pub struct Core {
     pub db: Db,
     pub data_dir: PathBuf,
     pub files: Files,
     pub hub: Hub,
-    pub peer: Arc<dyn Peer>,
+    /// This server's network.
+    pub net: NetId,
+    pub topo: Topology,
+    pub peers: HashMap<NetId, Arc<dyn Peer>>,
     pub clock: Clock,
 }
 
@@ -128,9 +135,28 @@ pub struct Caller {
 }
 
 impl Core {
-    pub fn new(db: Db, data_dir: PathBuf, peer: Arc<dyn Peer>) -> anyhow::Result<Core> {
+    pub fn new(db: Db, data_dir: PathBuf, net: NetId, topo: Topology, peers: HashMap<NetId, Arc<dyn Peer>>) -> anyhow::Result<Core> {
         let files = Files::new(data_dir.join("files"))?;
-        Ok(Core { db, data_dir, files, hub: Hub::default(), peer, clock: Clock::default() })
+        let core = Core { db, data_dir, files, hub: Hub::default(), net, topo, peers, clock: Clock::default() };
+        core.migrate_route_policies().map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(core)
+    }
+
+    /// The original layout: this server is 업무망 (internal), `peer` is 인터넷망 (external).
+    pub fn two_network(db: Db, data_dir: PathBuf, peer: Arc<dyn Peer>) -> anyhow::Result<Core> {
+        Core::new(db, data_dir, NetId::internal(), Topology::legacy(), HashMap::from([(NetId::external(), peer)]))
+    }
+
+    pub fn is_local(&self, net: &NetId) -> bool {
+        *net == self.net
+    }
+
+    pub fn peer(&self, net: &NetId) -> Result<&Arc<dyn Peer>, ApiError> {
+        self.peers.get(net).ok_or_else(|| ApiError::new(ErrorCode::LinkDown, format!("{} 연계서버가 설정되어 있지 않습니다", self.topo.name(net))))
+    }
+
+    pub fn net_name(&self, net: &NetId) -> String {
+        self.topo.name(net)
     }
 
     pub async fn handle(&self, ctx: CallCtx, req: ApiRequest) -> ApiResult {
@@ -150,8 +176,11 @@ impl Core {
             ApiRequest::Unlock { password } => self.unlock(c, &password),
             ApiRequest::ChangePassword { old, new } => self.change_password(c, &old, &new),
             ApiRequest::Me => self.me(c).map(ApiResponse::Me),
-            ApiRequest::Usage => Ok(ApiResponse::Usage(Usage { limits: self.effective_limits(c.user_id)?, used_today: self.used_today(c.user_id)? })),
-            ApiRequest::CreateTransfers { files, reason } => self.create_transfers(c, &files, &reason).map(ApiResponse::Ids),
+            ApiRequest::Usage { to } => {
+                let p = self.user_route(c, &to)?;
+                Ok(ApiResponse::Usage(Usage { limits: self.effective_limits(c.user_id, &p)?, used_today: self.used_today(c.user_id, &p.route)? }))
+            }
+            ApiRequest::CreateTransfers { to, files, reason } => self.create_transfers(c, &to, &files, &reason).map(ApiResponse::Ids),
             ApiRequest::CompleteUpload { id } => self.complete_upload(c, id).await.map(ApiResponse::Transfer),
             ApiRequest::ListOutgoing => self.list_outgoing(c).map(ApiResponse::Transfers),
             ApiRequest::ListIncoming => self.list_incoming(c).map(ApiResponse::Transfers),
@@ -162,23 +191,47 @@ impl Core {
             ApiRequest::GetDelegation => self.get_delegation(c.user_id).map(ApiResponse::Delegation),
             ApiRequest::SetDelegation { proxy_username, from, to } => self.set_delegation(c, &proxy_username, from, to).map(|_| ApiResponse::Ok),
             ApiRequest::ClearDelegation => self.clear_delegation(c).map(|_| ApiResponse::Ok),
-            ApiRequest::Clipboard { text } => self.clipboard(c, &text).await,
+            ApiRequest::Clipboard { to, text } => self.clipboard(c, &to, &text).await,
             ApiRequest::Admin { req } => self.admin(c, req).await,
         }
     }
 
-    /// Sends an event to a device on either network; true when it was delivered.
-    pub async fn push(&self, side: Side, device_id: i64, ev: Event) -> bool {
-        match side {
-            Side::Internal => self.hub.push(device_id, ev),
-            Side::External => self.peer.push_event(device_id, ev).await.unwrap_or(false),
+    /// Sends an event to a device on any network; true when it was delivered.
+    pub async fn push(&self, side: &NetId, device_id: i64, ev: Event) -> bool {
+        if self.is_local(side) {
+            return self.hub.push(device_id, ev);
+        }
+        match self.peers.get(side) {
+            Some(p) => p.push_event(device_id, ev).await.unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// Pushes to every live device on every network.
+    pub async fn push_everyone(&self, ev: Event) {
+        for d in self.hub.online() {
+            self.hub.push(d, ev.clone());
+        }
+        for p in self.peers.values() {
+            for d in p.online_devices().await.unwrap_or_default() {
+                let _ = p.push_event(d, ev.clone()).await;
+            }
+        }
+    }
+
+    /// Removes a transfer's payload from the server of `net`.
+    pub async fn remove_at(&self, net: &NetId, id: i64) {
+        if self.is_local(net) {
+            self.files.remove(id);
+        } else if let Ok(p) = self.peer(net) {
+            let _ = p.delete_file(id).await;
         }
     }
 
     /// Pushes to every registered device of the user.
     pub async fn push_user(&self, user_id: i64, ev: Event) {
         for (side, id) in self.devices_of(user_id).unwrap_or_default() {
-            self.push(side, id, ev.clone()).await;
+            self.push(&side, id, ev.clone()).await;
         }
     }
 
@@ -186,7 +239,7 @@ impl Core {
         self.db.with(|c| {
             let mut st = c.prepare("SELECT side, id FROM devices WHERE user_id=?1")?;
             let rows = st.query_map([user_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            Ok(rows.filter_map(|r| r.ok()).filter_map(|(s, id)| Side::parse(&s).map(|s| (s, id))).collect())
+            Ok(rows.filter_map(|r| r.ok()).map(|(s, id)| (NetId(s), id)).collect())
         })
     }
 

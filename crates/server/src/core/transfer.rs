@@ -1,4 +1,5 @@
 use super::{dec, enc, scan_path, CallCtx, Caller, Core, ScanResult};
+use netbridge_proto::Route;
 use netbridge_proto::*;
 use rusqlite::{params, OptionalExtension, Row};
 
@@ -32,8 +33,8 @@ pub fn sanitize_name(name: &str) -> String {
     if reserved { format!("_{clean}") } else { clean }
 }
 
-pub(super) const SELECT_TRANSFER: &str = "SELECT t.id, u.name, t.direction, t.file_name, t.size, t.sha256, t.reason, t.state, t.mode, t.pii, t.unscannable, t.block_reason, t.sender_ip, t.receiver_ip, t.created_at,
-  a.id, a.mode, a.status, ap.name, dby.name, a.by_proxy, a.comment, a.decided_at, a.overdue, t.user_id
+pub(super) const SELECT_TRANSFER: &str = "SELECT t.id, u.name, t.from_net || '>' || t.to_net, t.file_name, t.size, t.sha256, t.reason, t.state, t.mode, t.pii, t.unscannable, t.block_reason, t.sender_ip, t.receiver_ip, t.created_at,
+  a.id, a.mode, a.status, ap.name, dby.name, a.by_proxy, a.comment, a.decided_at, a.overdue, t.user_id, t.threats
   FROM transfers t JOIN users u ON u.id=t.user_id LEFT JOIN approvals a ON a.transfer_id=t.id
   LEFT JOIN users ap ON ap.id=a.approver_id LEFT JOIN users dby ON dby.id=a.decided_by";
 
@@ -55,7 +56,12 @@ pub(super) fn row_transfer(r: &Row) -> rusqlite::Result<TransferInfo> {
     Ok(TransferInfo {
         id: r.get(0)?,
         owner: r.get(1)?,
-        direction: dec(&r.get::<_, String>(2)?)?,
+        route: {
+            // network ids never contain '>' (config ids are short names)
+            let s = r.get::<_, String>(2)?;
+            let (a, b) = s.split_once('>').unwrap_or((&s, ""));
+            Route::new(NetId::new(a), NetId::new(b))
+        },
         file_name: r.get(3)?,
         size: r.get::<_, i64>(4)? as u64,
         sha256: r.get(5)?,
@@ -64,6 +70,7 @@ pub(super) fn row_transfer(r: &Row) -> rusqlite::Result<TransferInfo> {
         mode: r.get::<_, Option<String>>(8)?.map(|s| dec(&s)).transpose()?,
         pii: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
         unscannable: r.get(10)?,
+        threats: serde_json::from_str(&r.get::<_, String>(25)?).unwrap_or_default(),
         block_reason: r.get(11)?,
         sender_ip: r.get(12)?,
         receiver_ip: r.get(13)?,
@@ -97,27 +104,28 @@ impl Core {
         })
     }
 
-    pub(super) fn create_transfers(&self, c: &Caller, files: &[FileMeta], reason: &str) -> Result<Vec<i64>, ApiError> {
+    pub(super) fn create_transfers(&self, c: &Caller, to: &NetId, files: &[FileMeta], reason: &str) -> Result<Vec<i64>, ApiError> {
         if files.is_empty() {
             return Err(ApiError::bad("보낼 파일을 선택하세요"));
         }
+        let route = self.user_route(c, to)?;
         let approver: Option<i64> = self.db.with(|db| db.query_row("SELECT approver_id FROM users WHERE id=?1", [c.user_id], |r| r.get(0)))?;
         if approver.is_none() {
             return Err(ApiError::bad("결재자가 지정되지 않았습니다. 관리자에게 결재자 지정을 요청하세요"));
         }
         let mut pending = 0;
         for f in files {
-            self.check_file_with(c.user_id, &sanitize_name(&f.name), f.size, pending)?;
+            self.check_file_with(c.user_id, &route, &sanitize_name(&f.name), f.size, pending)?;
             pending += f.size;
         }
         let now = self.clock.now();
-        let dir = enc(&c.side.outgoing());
+        let (from, to) = (route.route.from.as_str(), route.route.to.as_str());
         self.db.tx(|tx| {
             let mut ids = vec![];
             for f in files {
                 tx.execute(
-                    "INSERT INTO transfers(user_id,direction,file_name,size,sha256,reason,state,sender_ip,created_at) VALUES(?1,?2,?3,?4,?5,?6,'Uploading',?7,?8)",
-                    params![c.user_id, dir, sanitize_name(&f.name), f.size as i64, f.sha256.to_ascii_lowercase(), reason.trim(), c.ip, now],
+                    "INSERT INTO transfers(user_id,direction,from_net,to_net,file_name,size,sha256,reason,state,sender_ip,created_at) VALUES(?1,'',?2,?3,?4,?5,?6,?7,'Uploading',?8,?9)",
+                    params![c.user_id, from, to, sanitize_name(&f.name), f.size as i64, f.sha256.to_ascii_lowercase(), reason.trim(), c.ip, now],
                 )
                 .map_err(ApiError::internal)?;
                 ids.push(tx.last_insert_rowid());
@@ -131,12 +139,12 @@ impl Core {
         let c = self.authenticate(ctx).await?;
         let t = self.transfer_info(id)?;
         let owner = self.transfer_owner(id)?;
-        let from = t.direction.from_side();
+        let from = t.route.from.clone();
         let forbidden = || ApiError::new(ErrorCode::Forbidden, "이 파일에 접근할 권한이 없습니다");
         let ok = match op {
             FileOp::Upload => owner == c.user_id && t.state == TransferState::Uploading && c.side == from,
             FileOp::Download => {
-                let receiver = owner == c.user_id && matches!(t.state, TransferState::Available | TransferState::Downloaded) && c.side == from.other();
+                let receiver = owner == c.user_id && matches!(t.state, TransferState::Available | TransferState::Downloaded) && c.side == t.route.to;
                 // approvers preview a pre-approval file only on the sending network
                 let preview = t.state == TransferState::Pending
                     && c.side == from
@@ -155,15 +163,15 @@ impl Core {
 
     pub(super) async fn complete_upload(&self, c: &Caller, id: i64) -> Result<TransferInfo, ApiError> {
         let t = self.transfer_info(id)?;
-        if self.transfer_owner(id)? != c.user_id || t.state != TransferState::Uploading || t.direction.from_side() != c.side {
+        if self.transfer_owner(id)? != c.user_id || t.state != TransferState::Uploading || t.route.from != c.side {
             return Err(ApiError::new(ErrorCode::Forbidden, "이 전송 건을 완료할 수 없습니다"));
         }
         // unfinished uploads do not count toward the day, so the limit is checked again here,
         // atomically with reserving this file's share so concurrent completions cannot both pass
-        let l = self.effective_limits(c.user_id)?;
+        let l = self.effective_limits(c.user_id, &self.route_policy(&t.route)?)?;
         let start = self.kst_day_start();
         self.db.tx(|tx| {
-            let used = super::limits::used_since(tx, c.user_id, start).map_err(ApiError::internal)?;
+            let used = super::limits::used_since(tx, c.user_id, start, &t.route).map_err(ApiError::internal)?;
             if used + t.size > l.daily_bytes {
                 return Err(ApiError::new(
                     ErrorCode::LimitExceeded,
@@ -184,21 +192,22 @@ impl Core {
     }
 
     async fn finish_upload(&self, c: &Caller, id: i64, t: &TransferInfo) -> Result<TransferInfo, ApiError> {
-        let policy = self.db.policy()?;
-        let scan: ScanResult = match c.side {
-            Side::Internal => scan_path(&t.file_name, &self.files.path(id), &policy).map_err(|_| ApiError::bad("올린 파일이 없습니다"))?,
-            Side::External => self.peer.scan(id, &t.file_name, &policy).await?,
+        let global = self.db.policy()?;
+        let route = self.route_policy(&t.route)?;
+        // the sending network's server scans with this route's PII thresholds
+        let policy = Policy { pii_rules: route.effective_pii(&global.pii_rules), ..global };
+        let scan: ScanResult = if self.is_local(&c.side) {
+            scan_path(&t.file_name, &self.files.path(id), &policy).map_err(|_| ApiError::bad("올린 파일이 없습니다"))?
+        } else {
+            self.peer(&c.side)?.scan(id, &t.file_name, &policy).await?
         };
         if scan.size != t.size || scan.sha256 != t.sha256 {
-            match c.side {
-                Side::Internal => self.files.remove(id),
-                Side::External => self.peer.delete_file(id).await?,
-            }
+            self.remove_at(&c.side, id).await;
             return Err(ApiError::new(ErrorCode::Conflict, "파일이 올바르게 올라가지 않았습니다. 다시 보내세요"));
         }
         let pii = serde_json::to_string(&scan.hits).map_err(ApiError::internal)?;
         self.db.with(|db| db.execute("UPDATE transfers SET pii=?2, unscannable=?3 WHERE id=?1", params![id, pii, scan.unscannable]))?;
-        self.audit(Some((c.user_id, &c.username)), "transfer", Some(&c.ip), &format!("#{id} {} {} ({}B)", t.direction.label(), t.file_name, t.size));
+        self.audit(Some((c.user_id, &c.username)), "transfer", Some(&c.ip), &format!("#{id} {} {} ({}B)", t.route.label(&self.topo), t.file_name, t.size));
         self.route_transfer(id, &scan).await?;
         self.transfer_info(id)
     }
@@ -208,13 +217,13 @@ impl Core {
     }
 
     pub(super) fn list_incoming(&self, c: &Caller) -> Result<Vec<TransferInfo>, ApiError> {
-        let dir = enc(&c.side.other().outgoing());
-        self.list(&format!("t.user_id=?1 AND t.direction='{dir}' AND t.state IN ('Available','Downloaded')"), c.user_id)
+        let to = c.side.as_str().replace('\'', "''");
+        self.list(&format!("t.user_id=?1 AND t.to_net='{to}' AND t.state IN ('Available','Downloaded')"), c.user_id)
     }
 
     pub(super) fn mark_downloaded(&self, c: &Caller, id: i64) -> Result<(), ApiError> {
         let t = self.transfer_info(id)?;
-        if self.transfer_owner(id)? != c.user_id || t.direction.from_side() == c.side || !matches!(t.state, TransferState::Available | TransferState::Downloaded) {
+        if self.transfer_owner(id)? != c.user_id || t.route.to != c.side || !matches!(t.state, TransferState::Available | TransferState::Downloaded) {
             return Err(ApiError::new(ErrorCode::Forbidden, "받을 수 없는 파일입니다"));
         }
         self.db.with(|db| db.execute("UPDATE transfers SET state='Downloaded', receiver_ip=?2 WHERE id=?1", params![id, c.ip]))?;

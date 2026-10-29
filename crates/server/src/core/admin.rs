@@ -8,8 +8,8 @@ impl Core {
         if c.role != Role::Admin {
             return Err(ApiError::new(ErrorCode::Forbidden, "관리자 권한이 필요합니다"));
         }
-        if c.side != Side::Internal {
-            return Err(ApiError::new(ErrorCode::Forbidden, "관리자 기능은 업무망에서만 사용할 수 있습니다"));
+        if !self.is_local(&c.side) {
+            return Err(ApiError::new(ErrorCode::Forbidden, format!("관리자 기능은 {}에서만 사용할 수 있습니다", self.topo.name(&self.net))));
         }
         let me = Some((c.user_id, c.username.as_str()));
         let ip = Some(c.ip.as_str());
@@ -25,8 +25,8 @@ impl Core {
                         self.db
                             .with(|db| {
                                 db.execute(
-                                    "UPDATE users SET username=?2, name=?3, dept_id=?4, role=?5, approver_id=?6 WHERE id=?1",
-                                    params![id, user.username.trim(), user.name.trim(), user.dept_id, role_str(user.role), user.approver_id],
+                                    "UPDATE users SET username=?2, name=?3, dept_id=?4, role=?5, approver_id=?6, networks=?7 WHERE id=?1",
+                                    params![id, user.username.trim(), user.name.trim(), user.dept_id, role_str(user.role), user.approver_id, serde_json::to_string(&user.networks).unwrap_or_else(|_| "[]".into())],
                                 )
                             })
                             .map_err(|e| if e.message.contains("UNIQUE") { ApiError::bad("이미 있는 아이디입니다") } else { e })?;
@@ -56,13 +56,14 @@ impl Core {
                 // a released (possibly lost) PC must stop receiving tokens and clipboard
                 self.end_user_sessions(c, user_id, "관리자가 PC 등록을 해제했습니다").await?;
                 if let Some(d) = dev {
-                    match side {
-                        Side::Internal => self.hub.drop_device(d),
-                        Side::External => self.peer.drop_device(d).await?,
+                    if self.is_local(&side) {
+                        self.hub.drop_device(d);
+                    } else {
+                        self.peer(&side)?.drop_device(d).await?;
                     }
                 }
                 self.db.with(|db| db.execute("DELETE FROM devices WHERE user_id=?1 AND side=?2", params![user_id, side.as_str()]))?;
-                self.audit(me, "admin", ip, &format!("기기 해제: 사용자 #{user_id} {}", side.label()));
+                self.audit(me, "admin", ip, &format!("기기 해제: 사용자 #{user_id} {}", self.topo.name(&side)));
                 Ok(ApiResponse::Ok)
             }
             AdminRequest::ListDepts => self
@@ -96,13 +97,22 @@ impl Core {
                 self.audit(me, "admin", ip, &format!("용량 한도 변경: {scope:?} → {limits:?}"));
                 Ok(ApiResponse::Ok)
             }
-            AdminRequest::ListApprovalRules => Ok(ApiResponse::ApprovalRules(self.db.approval_rules()?)),
-            AdminRequest::SetApprovalRules { mut rules } => {
-                for r in &mut rules {
-                    r.exts = r.exts.iter().map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|e| !e.is_empty()).collect();
+            AdminRequest::ListRoutePolicies => Ok(ApiResponse::RoutePolicies(self.route_policies()?)),
+            AdminRequest::SetRoutePolicy { mut policy } => {
+                let clean = |v: &[String]| v.iter().map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|e| !e.is_empty()).collect::<Vec<_>>();
+                for r in &mut policy.approval_rules {
+                    r.exts = clean(&r.exts);
                 }
-                self.db.set_setting("approval_rules", &serde_json::to_string(&rules).map_err(ApiError::internal)?)?;
-                self.audit(me, "admin", ip, &format!("결재 규칙 변경: {}개", rules.len()));
+                policy.blocked_exts = clean(&policy.blocked_exts);
+                policy.allowed_exts = clean(&policy.allowed_exts);
+                if policy.limits.daily_bytes == 0 || policy.limits.per_file_bytes == 0 {
+                    return Err(ApiError::bad("하루 한도와 파일 1개 한도는 0보다 커야 합니다"));
+                }
+                let old = self.route_policy(&policy.route)?;
+                self.set_route_policy(&policy)?;
+                let diff = route_diff(&old, &policy);
+                self.audit(me, "policy_change", ip, &format!("통로 정책 {}: {diff}", policy.route.label(&self.topo)));
+                self.push_everyone(Event::PolicyChanged { policy: self.db.policy()? }).await;
                 Ok(ApiResponse::Ok)
             }
             AdminRequest::QueryAudit { query } => self.query_audit(&query).map(ApiResponse::Audit),
@@ -115,7 +125,7 @@ impl Core {
                     .optional()
                 })?;
                 let (uid, username) = row.ok_or_else(|| ApiError::new(ErrorCode::NotFound, "이미 끝난 세션입니다"))?;
-                let target = Caller { session_id, user_id: uid, username: username.clone(), role: Role::User, side: c.side, ip: c.ip.clone() };
+                let target = Caller { session_id, user_id: uid, username: username.clone(), role: Role::User, side: c.side.clone(), ip: c.ip.clone() };
                 self.logout(&target, "관리자가 세션을 종료했습니다").await?;
                 self.audit(me, "admin", ip, &format!("세션 강제 종료: {username}"));
                 Ok(ApiResponse::Ok)
@@ -132,7 +142,7 @@ impl Core {
         })?;
         let username: String = self.db.with(|db| db.query_row("SELECT username FROM users WHERE id=?1", [user_id], |r| r.get(0)))?;
         for sid in sessions {
-            let target = Caller { session_id: sid, user_id, username: username.clone(), role: Role::User, side: c.side, ip: c.ip.clone() };
+            let target = Caller { session_id: sid, user_id, username: username.clone(), role: Role::User, side: c.side.clone(), ip: c.ip.clone() };
             self.logout(&target, reason).await?;
         }
         Ok(())
@@ -140,7 +150,7 @@ impl Core {
 
     fn list_users(&self) -> Result<Vec<UserInfo>, ApiError> {
         let mut users: Vec<UserInfo> = self.db.with(|db| {
-            let mut st = db.prepare("SELECT id, username, name, dept_id, role, approver_id, locked FROM users ORDER BY username")?;
+            let mut st = db.prepare("SELECT id, username, name, dept_id, role, approver_id, locked, networks FROM users ORDER BY username")?;
             let v = st
                 .query_map([], |r| {
                     Ok(UserInfo {
@@ -152,6 +162,7 @@ impl Core {
                         approver_id: r.get(5)?,
                         locked: r.get(6)?,
                         devices: vec![],
+                        networks: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -159,7 +170,7 @@ impl Core {
         })?;
         for u in &mut users {
             u.devices = self.devices_of(u.id)?.into_iter().map(|(s, _)| s).collect();
-            u.devices.sort_by_key(|s| s.as_str());
+            u.devices.sort();
         }
         Ok(users)
     }
@@ -200,8 +211,10 @@ impl Core {
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionInfo>, ApiError> {
-        let internal = self.hub.online();
-        let external = self.peer.online_devices().await.unwrap_or_default();
+        let mut live: Vec<(NetId, Vec<i64>)> = vec![(self.net.clone(), self.hub.online())];
+        for (n, p) in &self.peers {
+            live.push((n.clone(), p.online_devices().await.unwrap_or_default()));
+        }
         let rows: Vec<(i64, i64, String, String, i64, i64)> = self.db.with(|db| {
             let mut st = db.prepare("SELECT s.id, s.user_id, u.username, u.name, s.created_at, s.last_seen FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.ended_at IS NULL ORDER BY s.last_seen DESC")?;
             let v = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -212,15 +225,21 @@ impl Core {
                 let mut online: Vec<Side> = self
                     .devices_of(uid)?
                     .into_iter()
-                    .filter(|(s, d)| match s {
-                        Side::Internal => internal.contains(d),
-                        Side::External => external.contains(d),
-                    })
+                    .filter(|(s, d)| live.iter().any(|(n, ids)| n == s && ids.contains(d)))
                     .map(|(s, _)| s)
                     .collect();
-                online.sort_by_key(|s| s.as_str());
+                online.sort();
                 Ok(SessionInfo { id, username, name, created_at, last_seen, online })
             })
             .collect()
     }
+}
+
+/// "field: old → new" for each changed field of a route policy.
+fn route_diff(old: &RoutePolicy, new: &RoutePolicy) -> String {
+    let a = serde_json::to_value(old).unwrap_or_default();
+    let b = serde_json::to_value(new).unwrap_or_default();
+    let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else { return String::new() };
+    let v: Vec<String> = b.iter().filter(|(k, v)| a.get(*k) != Some(*v)).map(|(k, v)| format!("{k}: {} → {v}", a.get(k).cloned().unwrap_or_default())).collect();
+    if v.is_empty() { "변경 없음".into() } else { v.join(", ") }
 }

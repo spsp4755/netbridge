@@ -18,10 +18,11 @@ pub fn ext_of(name: &str) -> String {
 }
 
 /// Unfinished uploads count only once their completion has reserved them.
-pub(super) fn used_since(c: &rusqlite::Connection, user_id: i64, start: i64) -> rusqlite::Result<u64> {
+/// Counted per route: each direction of each link has its own daily allowance.
+pub(super) fn used_since(c: &rusqlite::Connection, user_id: i64, start: i64, route: &Route) -> rusqlite::Result<u64> {
     let n: i64 = c.query_row(
-        "SELECT COALESCE(SUM(size),0) FROM transfers WHERE user_id=?1 AND created_at>=?2 AND state NOT IN ('Rejected','Blocked') AND (state<>'Uploading' OR reserved=1)",
-        params![user_id, start],
+        "SELECT COALESCE(SUM(size),0) FROM transfers WHERE user_id=?1 AND created_at>=?2 AND from_net=?3 AND to_net=?4 AND state NOT IN ('Rejected','Blocked') AND (state<>'Uploading' OR reserved=1)",
+        params![user_id, start, route.from.as_str(), route.to.as_str()],
         |r| r.get(0),
     )?;
     Ok(n as u64)
@@ -45,8 +46,8 @@ impl Core {
         })
     }
 
-    /// User override, then department override, then the company default.
-    pub fn effective_limits(&self, user_id: i64) -> Result<Limits, ApiError> {
+    /// User override, then department override, then the route's limits.
+    pub fn effective_limits(&self, user_id: i64, route: &RoutePolicy) -> Result<Limits, ApiError> {
         if let Some(l) = self.override_of(LimitScope::User(user_id))? {
             return Ok(l);
         }
@@ -56,7 +57,7 @@ impl Core {
                 return Ok(l);
             }
         }
-        Ok(self.db.policy()?.default_limits)
+        Ok(route.limits)
     }
 
     pub fn set_limit_override(&self, scope: LimitScope, limits: Option<Limits>) -> Result<(), ApiError> {
@@ -79,28 +80,27 @@ impl Core {
     }
 
     /// Bytes sent since KST midnight, not counting rejected or blocked transfers.
-    pub fn used_today(&self, user_id: i64) -> Result<u64, ApiError> {
+    pub fn used_today(&self, user_id: i64, route: &Route) -> Result<u64, ApiError> {
         let start = self.kst_day_start();
-        self.db.with(|c| used_since(c, user_id, start))
+        self.db.with(|c| used_since(c, user_id, start, route))
     }
 
-    pub fn check_file(&self, user_id: i64, name: &str, size: u64) -> Result<(), ApiError> {
-        self.check_file_with(user_id, name, size, 0)
+    pub fn check_file(&self, user_id: i64, p: &RoutePolicy, name: &str, size: u64) -> Result<(), ApiError> {
+        self.check_file_with(user_id, p, name, size, 0)
     }
 
     /// `pending` is the size of files earlier in the same batch.
-    pub fn check_file_with(&self, user_id: i64, name: &str, size: u64, pending: u64) -> Result<(), ApiError> {
-        let p = self.db.policy()?;
+    pub fn check_file_with(&self, user_id: i64, p: &RoutePolicy, name: &str, size: u64, pending: u64) -> Result<(), ApiError> {
         let ext = ext_of(name);
         if p.blocked_exts.iter().any(|e| e.eq_ignore_ascii_case(&ext)) || (!p.allowed_exts.is_empty() && !p.allowed_exts.iter().any(|e| e.eq_ignore_ascii_case(&ext))) {
             let shown = if ext.is_empty() { "확장자 없음".to_string() } else { ext };
             return Err(ApiError::new(ErrorCode::Blocked, format!("{name}: 보낼 수 없는 파일 형식입니다 ({shown})")));
         }
-        let l = self.effective_limits(user_id)?;
+        let l = self.effective_limits(user_id, p)?;
         if size > l.per_file_bytes {
             return Err(ApiError::new(ErrorCode::LimitExceeded, format!("{name}: 파일 1개 한도({})를 넘습니다 ({})", fmt_bytes(l.per_file_bytes), fmt_bytes(size))));
         }
-        let used = self.used_today(user_id)? + pending;
+        let used = self.used_today(user_id, &p.route)? + pending;
         if used + size > l.daily_bytes {
             let left = l.daily_bytes.saturating_sub(used);
             return Err(ApiError::new(ErrorCode::LimitExceeded, format!("{name}: 하루 한도({})를 넘습니다. 오늘 남은 양: {}", fmt_bytes(l.daily_bytes), fmt_bytes(left))));
@@ -123,13 +123,7 @@ impl Core {
         self.store_policy(p)?;
         let diff = policy_diff(&old, p);
         self.audit(by.map(|c| (c.user_id, c.username.as_str())), "policy_change", by.map(|c| c.ip.as_str()), &diff);
-        let ev = Event::PolicyChanged { policy: p.clone() };
-        for d in self.hub.online() {
-            self.hub.push(d, ev.clone());
-        }
-        for d in self.peer.online_devices().await.unwrap_or_default() {
-            let _ = self.peer.push_event(d, ev.clone()).await;
-        }
+        self.push_everyone(Event::PolicyChanged { policy: p.clone() }).await;
         Ok(())
     }
 }

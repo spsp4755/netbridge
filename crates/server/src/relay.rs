@@ -1,10 +1,13 @@
-//! External server: app requests are relayed to the internal server; payload bytes stay here.
+//! A network's node: app requests are relayed to the central server; payload bytes stay here
+//! and move only over a link this network has (to the central server or a neighbor node).
 
 use crate::core::{scan_path, CallCtx, FileGrant, FileOp};
 use crate::files::Files;
 use crate::http::{serve_file, Backend, ErrResp};
 use crate::hub::Hub;
-use crate::link::{LinkBody, LinkHub};
+use crate::link::{LinkBody, LinkHub, LinkPeer, SHA_HEADER};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::extract::ws::WebSocketUpgrade;
@@ -20,9 +23,14 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 pub struct Relay {
+    pub net: NetId,
     pub link: Arc<LinkHub>,
     pub files: Files,
     pub hub: Hub,
+    /// Neighbor nodes this node sends files to directly.
+    pub neighbors: HashMap<NetId, LinkPeer>,
+    /// Last layout received from the central server.
+    pub topo: Mutex<Option<Topology>>,
 }
 
 const API_TIMEOUT: Duration = Duration::from_secs(600);
@@ -34,7 +42,15 @@ fn unexpected() -> ApiError {
 #[async_trait]
 impl Backend for Relay {
     fn side(&self) -> Side {
-        Side::External
+        self.net.clone()
+    }
+    async fn topology(&self) -> Topology {
+        if let Ok(LinkBody::ReplyTopology(t)) = self.link.call(LinkBody::Topology, Duration::from_secs(3)).await {
+            *self.topo.lock().unwrap() = Some(t.clone());
+            return t;
+        }
+        // central server unreachable: last known layout, or just this network
+        self.topo.lock().unwrap().clone().unwrap_or_else(|| Topology { hub: self.net.clone(), networks: vec![NetInfo { id: self.net.clone(), name: self.net.0.clone() }], routes: vec![] })
     }
     fn files(&self) -> &Files {
         &self.files
@@ -74,6 +90,7 @@ pub fn link_router(r: R) -> Router {
         .route("/link/push", post(push))
         .route("/link/online", get(online))
         .route("/link/drop", post(drop_device))
+        .route("/link/forward/{id}", post(forward))
         .layer(DefaultBodyLimit::disable())
         .with_state(r)
 }
@@ -87,11 +104,24 @@ async fn get_file(State(r): State<R>, Path(id): Path<i64>, headers: HeaderMap) -
     serve_file(&r.files, id, &headers).await
 }
 
-async fn put_file(State(r): State<R>, Path(id): Path<i64>, body: Body) -> Result<Response, ErrResp> {
+async fn put_file(State(r): State<R>, Path(id): Path<i64>, headers: HeaderMap, body: Body) -> Result<Response, ErrResp> {
     let path = r.files.path(id);
     // a unique temp name per push, so a retried or duplicate push of the same id never shares a file
     let tmp = path.with_extension(format!("{:016x}.part", rand::random::<u64>()));
+    let expect = headers.get(SHA_HEADER).and_then(|v| v.to_str().ok()).map(|s| s.to_ascii_lowercase());
     let res = write_stream(&tmp, body).await;
+    let res = match (res, expect) {
+        (Ok(()), Some(want)) => {
+            let t = tmp.clone();
+            let got = tokio::task::spawn_blocking(move || crate::files::sha256_of(&t)).await.map_err(ApiError::internal)?;
+            match got {
+                Ok(h) if h == want => Ok(()),
+                Ok(_) => Err(ApiError::new(ErrorCode::Conflict, "받은 파일의 해시가 다릅니다")),
+                Err(e) => Err(ApiError::internal(e)),
+            }
+        }
+        (res, _) => res,
+    };
     let res = match res {
         Ok(()) => tokio::fs::rename(&tmp, &path).await.map_err(ApiError::internal),
         Err(e) => Err(e),
@@ -153,6 +183,19 @@ async fn drop_device(State(r): State<R>, Json(q): Json<DropReq>) -> Json<serde_j
 
 async fn online(State(r): State<R>) -> Json<Vec<i64>> {
     Json(r.hub.online())
+}
+
+#[derive(serde::Deserialize)]
+struct ForwardReq {
+    to: NetId,
+    sha256: String,
+}
+
+/// Central server's order to send this node's copy straight to a neighbor network.
+async fn forward(State(r): State<R>, Path(id): Path<i64>, Json(q): Json<ForwardReq>) -> Result<Response, ErrResp> {
+    let n = r.neighbors.get(&q.to).ok_or_else(|| ApiError::new(ErrorCode::LinkDown, format!("{} 연계 주소가 이 서버 설정([[neighbors]])에 없습니다", q.to)))?;
+    n.push_checked(id, &r.files.path(id), Some(&q.sha256)).await?;
+    Ok(Json(serde_json::json!({ "ok": true })).into_response())
 }
 
 #[cfg(test)]

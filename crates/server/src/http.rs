@@ -19,6 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 #[async_trait]
 pub trait Backend: Send + Sync + 'static {
     fn side(&self) -> Side;
+    /// Networks and links, for the apps' Hello.
+    async fn topology(&self) -> Topology;
     fn files(&self) -> &Files;
     fn hub(&self) -> &Hub;
     async fn api(&self, ctx: CallCtx, req: ApiRequest) -> ApiResult;
@@ -79,7 +81,7 @@ pub fn app_router(b: B) -> Router {
 }
 
 async fn hello(State(b): State<B>) -> Json<Hello> {
-    Json(Hello { side: b.side(), server_time: chrono::Utc::now().timestamp() })
+    Json(Hello { side: b.side(), topology: b.topology().await, server_time: chrono::Utc::now().timestamp() })
 }
 
 /// For monitoring; no authentication.
@@ -173,7 +175,10 @@ pub async fn serve_file(files: &Files, id: i64, headers: &HeaderMap) -> Result<R
 #[async_trait]
 impl Backend for crate::core::Core {
     fn side(&self) -> Side {
-        Side::Internal
+        self.net.clone()
+    }
+    async fn topology(&self) -> Topology {
+        self.topo.clone()
     }
     fn files(&self) -> &Files {
         &self.files
@@ -185,7 +190,7 @@ impl Backend for crate::core::Core {
         self.handle(ctx, req).await
     }
     async fn device(&self, key: &str) -> Result<Option<i64>, ApiError> {
-        Ok(self.device_auth(key).filter(|d| d.side == Side::Internal).map(|d| d.device_id))
+        Ok(self.device_auth(key).filter(|d| d.side == self.net).map(|d| d.device_id))
     }
     async fn authorize(&self, ctx: CallCtx, id: i64, op: FileOp) -> Result<FileGrant, ApiError> {
         self.authorize_file(&ctx, id, op).await

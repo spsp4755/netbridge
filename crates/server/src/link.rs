@@ -24,13 +24,16 @@ pub enum LinkBody {
     Api { token: Option<String>, client_ip: String, req: ApiRequest },
     DeviceAuth { key: String },
     AuthorizeFile { token: Option<String>, client_ip: String, id: i64, upload: bool },
+    /// A node asks the central server for the network layout (for its apps' Hello).
+    Topology,
+    ReplyTopology(Topology),
     ReplyApi(Result<ApiResponse, ApiError>),
     ReplyDevice(Option<i64>),
     ReplyFile(Result<FileGrant, ApiError>),
 }
 
 pub fn link_down() -> ApiError {
-    ApiError::new(ErrorCode::LinkDown, "업무망 연계 구간이 끊어졌습니다. 잠시 후 다시 시도하세요")
+    ApiError::new(ErrorCode::LinkDown, "중앙 연계 구간이 끊어졌습니다. 잠시 후 다시 시도하세요")
 }
 
 /// External side: the currently attached link socket and calls waiting for a reply.
@@ -124,17 +127,17 @@ impl LinkHub {
     }
 }
 
-/// Internal side: keeps the link WebSocket up and answers the external server's calls.
-pub async fn run_link_client(core: Arc<Core>, ws_url: String, tls: Arc<rustls::ClientConfig>) {
+/// Central server: keeps the link WebSocket to one node up and answers that node's calls.
+pub async fn run_link_client(core: Arc<Core>, net: NetId, ws_url: String, tls: Arc<rustls::ClientConfig>) {
     let mut backoff = 1u64;
     loop {
         let connector = tokio_tungstenite::Connector::Rustls(tls.clone());
         match tokio_tungstenite::connect_async_tls_with_config(ws_url.as_str(), None, false, Some(connector)).await {
             Ok((socket, _)) => {
-                tracing::info!("linked to external server");
+                tracing::info!("linked to network {net}");
                 backoff = 1;
-                serve_link(core.clone(), socket).await;
-                tracing::warn!("link to external server lost; reconnecting");
+                serve_link(core.clone(), net.clone(), socket).await;
+                tracing::warn!("link to network {net} lost; reconnecting");
             }
             Err(e) => tracing::warn!("link connect failed: {e}"),
         }
@@ -143,7 +146,7 @@ pub async fn run_link_client(core: Arc<Core>, ws_url: String, tls: Arc<rustls::C
     }
 }
 
-async fn serve_link<S>(core: Arc<Core>, socket: tokio_tungstenite::WebSocketStream<S>)
+async fn serve_link<S>(core: Arc<Core>, net: NetId, socket: tokio_tungstenite::WebSocketStream<S>)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -168,9 +171,9 @@ where
         };
         let Ok(frame) = serde_json::from_str::<LinkFrame>(t.as_str()) else { continue };
         let core = core.clone();
-        let tx = tx.clone();
+        let (tx, net) = (tx.clone(), net.clone());
         tokio::spawn(async move {
-            let body = answer(&core, frame.body).await;
+            let body = answer(&core, &net, frame.body).await;
             if let Ok(text) = serde_json::to_string(&LinkFrame { id: frame.id, body }) {
                 let _ = tx.send(text);
             }
@@ -179,20 +182,24 @@ where
     writer.abort();
 }
 
-/// Everything arriving over the link is from the external network.
-async fn answer(core: &Core, body: LinkBody) -> LinkBody {
+/// Everything arriving over a node's link is from that node's network.
+async fn answer(core: &Core, net: &NetId, body: LinkBody) -> LinkBody {
     match body {
-        LinkBody::Api { token, client_ip, req } => LinkBody::ReplyApi(core.handle(CallCtx { token, client_ip, side: Side::External }, req).await),
-        LinkBody::DeviceAuth { key } => LinkBody::ReplyDevice(core.device_auth(&key).filter(|d| d.side == Side::External).map(|d| d.device_id)),
+        LinkBody::Api { token, client_ip, req } => LinkBody::ReplyApi(core.handle(CallCtx { token, client_ip, side: net.clone() }, req).await),
+        LinkBody::DeviceAuth { key } => LinkBody::ReplyDevice(core.device_auth(&key).filter(|d| d.side == *net).map(|d| d.device_id)),
         LinkBody::AuthorizeFile { token, client_ip, id, upload } => {
             let op = if upload { FileOp::Upload } else { FileOp::Download };
-            LinkBody::ReplyFile(core.authorize_file(&CallCtx { token, client_ip, side: Side::External }, id, op).await)
+            LinkBody::ReplyFile(core.authorize_file(&CallCtx { token, client_ip, side: net.clone() }, id, op).await)
         }
+        LinkBody::Topology => LinkBody::ReplyTopology(core.topo.clone()),
         other => LinkBody::ReplyApi(Err(ApiError::bad(format!("unexpected link frame {other:?}")))),
     }
 }
 
-/// Internal side's view of the external server over mTLS HTTPS.
+/// Header carrying the expected SHA-256 of a pushed file; the receiving node checks it before keeping the file.
+pub const SHA_HEADER: &str = "x-netbridge-sha256";
+
+/// The view of another network's node over mTLS HTTPS (central → node, node → neighbor).
 pub struct LinkPeer {
     base: String,
     http: reqwest::Client,
@@ -242,10 +249,7 @@ impl Peer for LinkPeer {
     }
 
     async fn push_file(&self, id: i64, src: &Path) -> Result<(), ApiError> {
-        let f = tokio::fs::File::open(src).await.map_err(ApiError::internal)?;
-        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(f, 256 * 1024));
-        check(self.http.put(self.url(&format!("/link/files/{id}"))).body(body).send().await.map_err(down)?).await?;
-        Ok(())
+        self.push_checked(id, src, None).await
     }
 
     async fn delete_file(&self, id: i64) -> Result<(), ApiError> {
@@ -266,5 +270,25 @@ impl Peer for LinkPeer {
 
     async fn online_devices(&self) -> Result<Vec<i64>, ApiError> {
         check(self.http.get(self.url("/link/online")).send().await.map_err(down)?).await?.json().await.map_err(down)
+    }
+
+    async fn forward(&self, id: i64, to: &NetId, sha256: &str) -> Result<(), ApiError> {
+        let r = self.http.post(self.url(&format!("/link/forward/{id}"))).json(&serde_json::json!({ "to": to, "sha256": sha256 })).send().await.map_err(down)?;
+        check(r).await?;
+        Ok(())
+    }
+}
+
+impl LinkPeer {
+    /// PUTs a file; with `sha256` the receiver rejects it unless the hash matches.
+    pub async fn push_checked(&self, id: i64, src: &Path, sha256: Option<&str>) -> Result<(), ApiError> {
+        let f = tokio::fs::File::open(src).await.map_err(ApiError::internal)?;
+        let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(f, 256 * 1024));
+        let mut req = self.http.put(self.url(&format!("/link/files/{id}"))).body(body);
+        if let Some(h) = sha256 {
+            req = req.header(SHA_HEADER, h);
+        }
+        check(req.send().await.map_err(down)?).await?;
+        Ok(())
     }
 }

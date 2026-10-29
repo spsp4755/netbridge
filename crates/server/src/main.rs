@@ -152,7 +152,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::InstallService { config, name } => {
             let config = std::path::absolute(&config)?;
             let cfg = ServerConfig::load(&config)?;
-            let name = name.unwrap_or_else(|| format!("NetBridge-{}", if cfg.side == netbridge_proto::Side::Internal { "Internal" } else { "External" }));
+            let name = name.unwrap_or_else(|| format!("NetBridge-{}", if cfg.network == netbridge_proto::NetId::internal() { "Internal".to_string() } else if cfg.network == netbridge_proto::NetId::external() { "External".to_string() } else { cfg.network.to_string() }));
             install_service(&name, &config)
         }
         Cmd::UninstallService { name } => uninstall_service(&name),
@@ -199,7 +199,7 @@ fn uninstall_service(_: &str) -> anyhow::Result<()> {
 
 fn init_admin(config: &std::path::Path, username: String, password: String) -> anyhow::Result<()> {
     let cfg = ServerConfig::load(config)?;
-    anyhow::ensure!(cfg.side == netbridge_proto::Side::Internal, "관리자 계정은 내부 연계서버에서 만듭니다");
+    anyhow::ensure!(cfg.is_hub(), "관리자 계정은 중앙 연계서버에서 만듭니다");
     let db = netbridge_server::db::Db::open(&cfg.db_path())?;
     let exists: Option<i64> = db
         .with(|c| {
@@ -217,9 +217,9 @@ fn init_admin(config: &std::path::Path, username: String, password: String) -> a
             println!("관리자 {username}의 비밀번호를 다시 정했습니다");
         }
         None => {
-            let core = Core::new(db, cfg.data_dir.clone(), std::sync::Arc::new(NoPeer)).context("init")?;
+            let core = Core::new(db, cfg.data_dir.clone(), cfg.network.clone(), cfg.topology.clone().unwrap(), Default::default()).context("init")?;
             let id = core
-                .create_user(&UserInput { id: None, username: username.clone(), name: "관리자".into(), dept_id: None, role: Role::Admin, approver_id: None, password: Some(password) })
+                .create_user(&UserInput { id: None, username: username.clone(), name: "관리자".into(), dept_id: None, role: Role::Admin, approver_id: None, password: Some(password), networks: vec![] })
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             core.clear_must_change(id).map_err(|e| anyhow::anyhow!("{e}"))?;
             println!("관리자 {username}을 만들었습니다");
@@ -228,30 +228,3 @@ fn init_admin(config: &std::path::Path, username: String, password: String) -> a
     Ok(())
 }
 
-/// Peer for offline CLI commands that never touch the external server.
-struct NoPeer;
-
-#[async_trait::async_trait]
-impl netbridge_server::core::Peer for NoPeer {
-    async fn scan(&self, _: i64, _: &str, _: &netbridge_proto::Policy) -> Result<netbridge_server::core::ScanResult, netbridge_proto::ApiError> {
-        Err(netbridge_server::link::link_down())
-    }
-    async fn fetch_file(&self, _: i64, _: &std::path::Path) -> Result<(), netbridge_proto::ApiError> {
-        Err(netbridge_server::link::link_down())
-    }
-    async fn push_file(&self, _: i64, _: &std::path::Path) -> Result<(), netbridge_proto::ApiError> {
-        Err(netbridge_server::link::link_down())
-    }
-    async fn delete_file(&self, _: i64) -> Result<(), netbridge_proto::ApiError> {
-        Ok(())
-    }
-    async fn push_event(&self, _: i64, _: netbridge_proto::Event) -> Result<bool, netbridge_proto::ApiError> {
-        Ok(false)
-    }
-    async fn online_devices(&self) -> Result<Vec<i64>, netbridge_proto::ApiError> {
-        Ok(vec![])
-    }
-    async fn drop_device(&self, _: i64) -> Result<(), netbridge_proto::ApiError> {
-        Ok(())
-    }
-}

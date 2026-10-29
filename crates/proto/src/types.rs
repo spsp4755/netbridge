@@ -3,65 +3,192 @@ use serde::{Deserialize, Serialize};
 
 pub type Ts = i64; // unix seconds, UTC
 
+/// A network (망) id from the server configuration, e.g. "A" or the legacy "internal"/"external".
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NetId(pub String);
+
+/// The network of a server or caller.
+pub type Side = NetId;
+
+impl NetId {
+    pub fn new(s: impl Into<String>) -> NetId {
+        NetId(s.into())
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Legacy two-network ids (업무망 / 인터넷망).
+    pub fn internal() -> NetId {
+        NetId::new("internal")
+    }
+    pub fn external() -> NetId {
+        NetId::new("external")
+    }
+}
+
+impl std::fmt::Display for NetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One direction of a link between two networks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Route {
+    pub from: NetId,
+    pub to: NetId,
+}
+
+impl Route {
+    pub fn new(from: NetId, to: NetId) -> Route {
+        Route { from, to }
+    }
+    pub fn reverse(&self) -> Route {
+        Route { from: self.to.clone(), to: self.from.clone() }
+    }
+    pub fn label(&self, topo: &Topology) -> String {
+        format!("{} → {}", topo.name(&self.from), topo.name(&self.to))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetInfo {
+    pub id: NetId,
+    pub name: String,
+}
+
+/// Networks and the links between them, from the central server's configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Topology {
+    /// The network whose server holds the database.
+    pub hub: NetId,
+    pub networks: Vec<NetInfo>,
+    /// Allowed directions; a link appears as two routes.
+    pub routes: Vec<Route>,
+}
+
+impl Topology {
+    /// The original two-network layout.
+    pub fn legacy() -> Topology {
+        let (i, e) = (NetId::internal(), NetId::external());
+        Topology {
+            hub: i.clone(),
+            networks: vec![NetInfo { id: e.clone(), name: "인터넷망".into() }, NetInfo { id: i.clone(), name: "업무망".into() }],
+            routes: vec![Route::new(e.clone(), i.clone()), Route::new(i, e)],
+        }
+    }
+    pub fn name(&self, id: &NetId) -> String {
+        self.networks.iter().find(|n| n.id == *id).map(|n| n.name.clone()).unwrap_or_else(|| id.0.clone())
+    }
+    pub fn has_route(&self, r: &Route) -> bool {
+        self.routes.contains(r)
+    }
+    /// Networks this one may send to.
+    pub fn targets(&self, from: &NetId) -> Vec<NetId> {
+        self.routes.iter().filter(|r| r.from == *from).map(|r| r.to.clone()).collect()
+    }
+    pub fn index(&self, id: &NetId) -> usize {
+        self.networks.iter().position(|n| n.id == *id).unwrap_or(0)
+    }
+}
+
+/// What a content scan found (see the netbridge-scan crate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Side {
-    External,
-    Internal,
+pub enum ThreatKind {
+    Executable,
+    Script,
+    Macro,
+    PdfActive,
+    ArchiveDanger,
+    Encrypted,
+    AvInfected,
+    ScannerError,
 }
 
-impl Side {
-    pub fn other(self) -> Side {
-        match self {
-            Side::External => Side::Internal,
-            Side::Internal => Side::External,
-        }
-    }
+impl ThreatKind {
+    pub const ALL: [ThreatKind; 8] =
+        [ThreatKind::Executable, ThreatKind::Script, ThreatKind::Macro, ThreatKind::PdfActive, ThreatKind::ArchiveDanger, ThreatKind::Encrypted, ThreatKind::AvInfected, ThreatKind::ScannerError];
     pub fn label(self) -> &'static str {
         match self {
-            Side::External => "인터넷망",
-            Side::Internal => "업무망",
+            ThreatKind::Executable => "실행 파일",
+            ThreatKind::Script => "스크립트",
+            ThreatKind::Macro => "문서 매크로",
+            ThreatKind::PdfActive => "PDF 실행 요소",
+            ThreatKind::ArchiveDanger => "위험한 압축",
+            ThreatKind::Encrypted => "암호 걸린 파일",
+            ThreatKind::AvInfected => "백신 탐지",
+            ThreatKind::ScannerError => "검사기 오류",
         }
     }
-    pub fn as_str(self) -> &'static str {
+    pub fn default_action(self) -> PiiAction {
         match self {
-            Side::External => "external",
-            Side::Internal => "internal",
-        }
-    }
-    pub fn parse(s: &str) -> Option<Side> {
-        match s {
-            "external" => Some(Side::External),
-            "internal" => Some(Side::Internal),
-            _ => None,
-        }
-    }
-    /// Direction of a transfer sent from this side.
-    pub fn outgoing(self) -> Direction {
-        match self {
-            Side::External => Direction::ToInternal,
-            Side::Internal => Direction::ToExternal,
+            ThreatKind::Executable | ThreatKind::Script | ThreatKind::ArchiveDanger | ThreatKind::AvInfected => PiiAction::Block,
+            ThreatKind::Macro | ThreatKind::PdfActive | ThreatKind::Encrypted | ThreatKind::ScannerError => PiiAction::ForcePre,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Direction {
-    ToInternal,
-    ToExternal,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub kind: ThreatKind,
+    pub detail: String,
 }
 
-impl Direction {
-    pub fn from_side(self) -> Side {
-        match self {
-            Direction::ToInternal => Side::External,
-            Direction::ToExternal => Side::Internal,
+/// Per-route override of a global PII rule's threshold and action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePii {
+    pub rule_id: String,
+    pub enabled: bool,
+    pub threshold: u32,
+    pub action: PiiAction,
+}
+
+/// Transfer policy of one direction of one link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutePolicy {
+    pub route: Route,
+    pub enabled: bool,
+    pub clipboard: bool,
+    pub limits: Limits,
+    pub blocked_exts: Vec<String>,
+    /// Empty means every extension not in `blocked_exts` is allowed.
+    pub allowed_exts: Vec<String>,
+    /// First match decides; no match means pre-approval.
+    pub approval_rules: Vec<ApprovalRule>,
+    pub pii: Vec<RoutePii>,
+    pub unscannable_action: PiiAction,
+    pub threat_actions: Vec<(ThreatKind, PiiAction)>,
+}
+
+impl RoutePolicy {
+    /// A new route starts from the global defaults.
+    pub fn from_global(route: Route, p: &Policy) -> RoutePolicy {
+        RoutePolicy {
+            route,
+            enabled: true,
+            clipboard: true,
+            limits: p.default_limits,
+            blocked_exts: p.blocked_exts.clone(),
+            allowed_exts: p.allowed_exts.clone(),
+            approval_rules: vec![],
+            pii: p.pii_rules.iter().map(|r| RoutePii { rule_id: r.id.clone(), enabled: r.enabled, threshold: r.threshold, action: r.action }).collect(),
+            unscannable_action: p.pii_unscannable_action,
+            threat_actions: ThreatKind::ALL.iter().map(|k| (*k, k.default_action())).collect(),
         }
     }
-    pub fn label(self) -> &'static str {
-        match self {
-            Direction::ToInternal => "인터넷망 → 업무망",
-            Direction::ToExternal => "업무망 → 인터넷망",
-        }
+    /// The global PII rules with this route's thresholds and actions.
+    pub fn effective_pii(&self, global: &[PiiRule]) -> Vec<PiiRule> {
+        global
+            .iter()
+            .map(|g| match self.pii.iter().find(|r| r.rule_id == g.id) {
+                Some(r) => PiiRule { enabled: g.enabled && r.enabled, threshold: r.threshold, action: r.action, ..g.clone() },
+                None => g.clone(),
+            })
+            .collect()
+    }
+    pub fn threat_action(&self, k: ThreatKind) -> PiiAction {
+        self.threat_actions.iter().find(|(t, _)| *t == k).map(|(_, a)| *a).unwrap_or(k.default_action())
     }
 }
 
@@ -184,7 +311,6 @@ impl Default for Policy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalRule {
     pub order: i32,
-    pub direction: Option<Direction>,
     /// Rule matches when size <= max_size.
     pub max_size: Option<u64>,
     /// Lowercase extensions without dot; empty = any.
@@ -265,7 +391,7 @@ pub struct ApprovalInfo {
 pub struct TransferInfo {
     pub id: i64,
     pub owner: String,
-    pub direction: Direction,
+    pub route: Route,
     pub file_name: String,
     pub size: u64,
     pub sha256: String,
@@ -274,6 +400,9 @@ pub struct TransferInfo {
     pub mode: Option<ApprovalMode>,
     pub pii: Vec<PiiHit>,
     pub unscannable: bool,
+    /// Content scan findings (executables, macros, antivirus, ...).
+    #[serde(default)]
+    pub threats: Vec<Finding>,
     pub block_reason: Option<String>,
     pub sender_ip: String,
     pub receiver_ip: Option<String>,
@@ -307,6 +436,10 @@ pub struct Me {
     pub client_ip: String,
     pub policy: Policy,
     pub must_change_password: bool,
+    /// Networks this user may use (all when the admin set none).
+    pub networks: Vec<NetId>,
+    /// Enabled routes from `side` to the user's other networks.
+    pub routes: Vec<RoutePolicy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +466,8 @@ pub struct UserInfo {
     pub approver_id: Option<i64>,
     pub locked: bool,
     pub devices: Vec<Side>,
+    /// Empty = every network.
+    pub networks: Vec<NetId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +480,9 @@ pub struct UserInput {
     pub approver_id: Option<i64>,
     /// Required when creating.
     pub password: Option<String>,
+    /// Empty = every network.
+    #[serde(default)]
+    pub networks: Vec<NetId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,5 +535,6 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub side: Side,
+    pub topology: Topology,
     pub server_time: Ts,
 }
