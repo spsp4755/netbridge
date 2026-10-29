@@ -89,3 +89,42 @@ async fn set_policy_pushes_and_audits() {
     let n: i64 = k.core.db.with(|c| c.query_row("SELECT COUNT(*) FROM audit WHERE kind='policy_change'", [], |r| r.get(0))).unwrap();
     assert_eq!(n, 1);
 }
+
+#[tokio::test]
+async fn concurrent_completes_cannot_both_pass_daily_limit() {
+    let k = kit();
+    let (ta, _) = k.pair().await;
+    let a = k.core.db.with(|c| c.query_row("SELECT id FROM users WHERE username='a'", [], |r| r.get::<_, i64>(0))).unwrap();
+    k.core.set_limit_override(LimitScope::User(a), Some(Limits { daily_bytes: 10, per_file_bytes: 10 })).unwrap();
+    let mut ids = vec![];
+    for body in [b"aaaaaa", b"bbbbbb"] {
+        let id = match k.create(Side::External, &ta, "f.txt", body).await.unwrap() {
+            ApiResponse::Ids(v) => v[0],
+            r => panic!("{r:?}"),
+        };
+        k.peer.files.lock().unwrap().insert(id, body.to_vec());
+        ids.push(id);
+    }
+    let (r1, r2) = tokio::join!(
+        k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id: ids[0] }),
+        k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id: ids[1] }),
+    );
+    let ok = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(ok, 1, "{r1:?} / {r2:?}");
+    assert!(k.core.used_today(a).unwrap() <= 10);
+}
+
+#[tokio::test]
+async fn failed_complete_releases_reservation() {
+    let k = kit();
+    let (ta, _) = k.pair().await;
+    let a = k.core.db.with(|c| c.query_row("SELECT id FROM users WHERE username='a'", [], |r| r.get::<_, i64>(0))).unwrap();
+    let id = match k.create(Side::External, &ta, "f.txt", b"hello").await.unwrap() {
+        ApiResponse::Ids(v) => v[0],
+        r => panic!("{r:?}"),
+    };
+    k.peer.files.lock().unwrap().insert(id, b"corrupt".to_vec());
+    let e = k.call(Side::External, Some(&ta), ApiRequest::CompleteUpload { id }).await.unwrap_err();
+    assert_eq!(e.code, ErrorCode::Conflict);
+    assert_eq!(k.core.used_today(a).unwrap(), 0);
+}

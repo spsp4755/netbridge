@@ -19,6 +19,8 @@ pub struct FakePeer {
 #[async_trait]
 impl Peer for FakePeer {
     async fn scan(&self, id: i64, name: &str, policy: &Policy) -> Result<ScanResult, ApiError> {
+        // a real scan crosses the link; let concurrent callers interleave here
+        tokio::task::yield_now().await;
         let bytes = self.files.lock().unwrap().get(&id).cloned().ok_or_else(|| ApiError::bad("no file"))?;
         Ok(netbridge_server::core::scan_bytes(name, &bytes, policy))
     }

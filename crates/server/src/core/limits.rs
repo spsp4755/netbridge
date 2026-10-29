@@ -17,6 +17,16 @@ pub fn ext_of(name: &str) -> String {
     name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default()
 }
 
+/// Unfinished uploads count only once their completion has reserved them.
+pub(super) fn used_since(c: &rusqlite::Connection, user_id: i64, start: i64) -> rusqlite::Result<u64> {
+    let n: i64 = c.query_row(
+        "SELECT COALESCE(SUM(size),0) FROM transfers WHERE user_id=?1 AND created_at>=?2 AND state NOT IN ('Rejected','Blocked') AND (state<>'Uploading' OR reserved=1)",
+        params![user_id, start],
+        |r| r.get(0),
+    )?;
+    Ok(n as u64)
+}
+
 fn scope_key(s: LimitScope) -> (&'static str, i64) {
     match s {
         LimitScope::Dept(id) => ("dept", id),
@@ -71,14 +81,7 @@ impl Core {
     /// Bytes sent since KST midnight, not counting rejected or blocked transfers.
     pub fn used_today(&self, user_id: i64) -> Result<u64, ApiError> {
         let start = self.kst_day_start();
-        let n: i64 = self.db.with(|c| {
-            c.query_row(
-                "SELECT COALESCE(SUM(size),0) FROM transfers WHERE user_id=?1 AND created_at>=?2 AND state NOT IN ('Rejected','Blocked','Uploading')",
-                params![user_id, start],
-                |r| r.get(0),
-            )
-        })?;
-        Ok(n as u64)
+        self.db.with(|c| used_since(c, user_id, start))
     }
 
     pub fn check_file(&self, user_id: i64, name: &str, size: u64) -> Result<(), ApiError> {
