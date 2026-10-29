@@ -14,7 +14,20 @@ pub struct ServerConfig {
     pub tls_cert: PathBuf,
     pub tls_key: PathBuf,
     pub ca_cert: PathBuf,
+    /// Daily-rotated log files; default `logs` next to the config file.
+    #[serde(default = "default_log_dir")]
+    pub log_dir: PathBuf,
+    #[serde(default = "default_log_keep_days")]
+    pub log_keep_days: usize,
     pub link: LinkConfig,
+}
+
+fn default_log_dir() -> PathBuf {
+    "logs".into()
+}
+
+fn default_log_keep_days() -> usize {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,7 +51,7 @@ impl ServerConfig {
         let mut cfg: ServerConfig = toml::from_str(&text).context("설정 파일 형식 오류")?;
         // Relative paths are relative to the config file.
         let base = path.parent().unwrap_or(Path::new("."));
-        for p in [&mut cfg.data_dir, &mut cfg.tls_cert, &mut cfg.tls_key, &mut cfg.ca_cert] {
+        for p in [&mut cfg.data_dir, &mut cfg.tls_cert, &mut cfg.tls_key, &mut cfg.ca_cert, &mut cfg.log_dir] {
             *p = base.join(&*p);
         }
         for p in [&mut cfg.link.client_cert, &mut cfg.link.client_key].into_iter().flatten() {
@@ -52,5 +65,10 @@ impl ServerConfig {
             _ => {}
         }
         Ok(cfg)
+    }
+
+    /// The internal server's database (the external server has none).
+    pub fn db_path(&self) -> PathBuf {
+        self.data_dir.join("netbridge.db")
     }
 }

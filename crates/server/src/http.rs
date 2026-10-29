@@ -69,6 +69,7 @@ type B = Arc<dyn Backend>;
 pub fn app_router(b: B) -> Router {
     Router::new()
         .route("/hello", get(hello))
+        .route("/health", get(health))
         .route("/api", post(api))
         .route("/ws", get(ws))
         .route("/upload/{id}", put(upload))
@@ -79,6 +80,11 @@ pub fn app_router(b: B) -> Router {
 
 async fn hello(State(b): State<B>) -> Json<Hello> {
     Json(Hello { side: b.side(), server_time: chrono::Utc::now().timestamp() })
+}
+
+/// For monitoring; no authentication.
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION"), "ok": true }))
 }
 
 async fn api(State(b): State<B>, ConnectInfo(addr): ConnectInfo<SocketAddr>, headers: HeaderMap, body: Bytes) -> Result<Json<ApiResponse>, ErrResp> {
