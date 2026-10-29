@@ -16,7 +16,7 @@ fn db_open_creates_schema_idempotent() {
 fn gen_certs_produces_chain() {
     let dir = tempfile::tempdir().unwrap();
     certs::gen_certs(dir.path(), &["localhost".into(), "10.0.0.1".into()], &["127.0.0.1".into()]).unwrap();
-    for f in ["ca.pem", "ca.key", "external.pem", "external.key", "internal.pem", "internal.key", "link-client.pem", "link-client.key"] {
+    for f in ["ca.pem", "ca.key", "external.pem", "external.key", "internal.pem", "internal.key", "link-client.pem", "link-client.key", "link-neighbor.pem", "link-neighbor.key"] {
         assert!(dir.path().join(f).exists(), "{f}");
     }
     certs::install_crypto();
@@ -30,7 +30,7 @@ fn gen_certs_produces_chain() {
     assert!(verifier.verify_server_cert(&chain[0], &chain[1..], &wrong, &[], now).is_err());
     // building TLS configs from the generated files must work
     certs::server_tls(&dir.path().join("internal.pem"), &dir.path().join("internal.key")).unwrap();
-    certs::link_server_tls(&dir.path().join("external.pem"), &dir.path().join("external.key"), &dir.path().join("ca.pem")).unwrap();
+    certs::link_server_tls(&dir.path().join("external.pem"), &dir.path().join("external.key"), &dir.path().join("ca.pem"), None).unwrap();
     certs::client_tls(&dir.path().join("ca.pem"), Some((&dir.path().join("link-client.pem"), &dir.path().join("link-client.key")))).unwrap();
 }
 

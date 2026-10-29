@@ -15,12 +15,7 @@ impl Core {
     pub fn device_auth(&self, key: &str) -> Option<DeviceRef> {
         let h = sha(key);
         self.db
-            .with(|c| {
-                c.query_row("SELECT id, user_id, side FROM devices WHERE key_hash=?1", [h], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
-                })
-                .optional()
-            })
+            .with(|c| c.query_row("SELECT id, user_id, side FROM devices WHERE key_hash=?1", [h], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))).optional())
             .ok()
             .flatten()
             .map(|(device_id, user_id, s)| DeviceRef { device_id, user_id, side: NetId(s) })
@@ -31,10 +26,8 @@ impl Core {
         let now = self.clock.now();
         let max = self.db.policy()?.session_max_minutes;
         let open = self.db.with(|c| {
-            c.query_row("SELECT id, token, created_at FROM sessions WHERE user_id=?1 AND ended_at IS NULL ORDER BY id DESC LIMIT 1", [uid], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
-            })
-            .optional()
+            c.query_row("SELECT id, token, created_at FROM sessions WHERE user_id=?1 AND ended_at IS NULL ORDER BY id DESC LIMIT 1", [uid], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))
+                .optional()
         })?;
         if let Some((id, token, created)) = open {
             if !max.is_some_and(|m| now - created > m as i64 * 60) {
@@ -60,21 +53,9 @@ impl Core {
         let expired = || ApiError::new(ErrorCode::SessionExpired, "로그인이 필요합니다");
         let token = ctx.token.as_deref().ok_or_else(expired)?;
         let row = self.db.with(|c| {
-            c.query_row(
-                "SELECT s.id, s.user_id, s.created_at, s.ended_at, u.username, u.role, u.locked FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1",
-                [token],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, Option<i64>>(3)?,
-                        r.get::<_, String>(4)?,
-                        r.get::<_, String>(5)?,
-                        r.get::<_, bool>(6)?,
-                    ))
-                },
-            )
+            c.query_row("SELECT s.id, s.user_id, s.created_at, s.ended_at, u.username, u.role, u.locked FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?1", [token], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?, r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, bool>(6)?))
+            })
             .optional()
         })?;
         let Some((sid, uid, created, ended, username, role, locked)) = row else { return Err(expired()) };
@@ -88,6 +69,10 @@ impl Core {
             let reason = if locked { "계정 잠김" } else { "최대 유지 시간 초과" };
             self.logout(&caller, reason).await?;
             return Err(ApiError::new(ErrorCode::SessionExpired, format!("세션이 종료되었습니다 ({reason})")));
+        }
+        // the admin may have taken this network away since the login
+        if !self.user_networks(uid)?.contains(&ctx.side) {
+            return Err(ApiError::new(ErrorCode::Forbidden, format!("이 계정은 {}에서 사용할 수 없습니다", self.topo.name(&ctx.side))));
         }
         self.db.with(|c| c.execute("UPDATE sessions SET last_seen=?2 WHERE id=?1", params![sid, now]))?;
         Ok(caller)

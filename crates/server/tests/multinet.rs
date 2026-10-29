@@ -140,3 +140,23 @@ async fn limits_are_per_route_direction() {
         r => panic!("{r:?}"),
     }
 }
+
+/// Narrowing a user's networks takes effect on open sessions, not only at the next login.
+#[tokio::test]
+async fn removing_a_network_cuts_open_sessions_there() {
+    let k = kit4();
+    let boss = k.user("boss", None, &[]);
+    let u = k.user("u", Some(boss), &[]);
+    let td = k.login("D", "u").await.unwrap();
+    assert!(k.call("D", Some(&td), ApiRequest::ListIncoming).await.is_ok());
+    let admin = k.core.create_user(&UserInput { id: None, username: "adm".into(), name: "adm".into(), dept_id: None, role: Role::Admin, approver_id: None, password: Some(PW.into()), networks: vec![] }).unwrap();
+    k.core.clear_must_change(admin).unwrap();
+    let ta = k.login("B", "adm").await.unwrap();
+    let input = UserInput { id: Some(u), username: "u".into(), name: "u".into(), dept_id: None, role: Role::User, approver_id: Some(boss), password: None, networks: vec![net("A"), net("B")] };
+    k.call("B", Some(&ta), ApiRequest::Admin { req: AdminRequest::UpsertUser { user: input } }).await.unwrap();
+    let e = k.call("D", Some(&td), ApiRequest::ListIncoming).await.unwrap_err();
+    assert!(matches!(e.code, ErrorCode::Forbidden | ErrorCode::SessionExpired), "{e:?}");
+    assert!(k.send("D", "B", &td, "x.txt", b"x").await.is_err());
+    // the same token still works on an allowed network
+    assert!(k.call("B", Some(&td), ApiRequest::ListIncoming).await.is_ok());
+}

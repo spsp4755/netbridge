@@ -8,12 +8,14 @@ tls_key = "certs/server.key"
 ca_cert = "certs/ca.pem"
 
 [link]
+# 중앙 서버의 연계 인증서. 중앙 연계 주소(listen)에는 이 인증서만 접속할 수 있습니다
+hub_cert = "certs/link-client.pem"
 listen = "10.0.4.10:19443"
 # 이웃 망(C) 서버가 파일을 보내 오는 주소. 중앙 서버가 확인한 전송만 받습니다
 neighbor_listen = "10.0.4.10:19444"
 # 이웃 망(C)으로 보낼 때 쓰는 인증서
-client_cert = "certs/link-client.pem"
-client_key = "certs/link-client.key"
+client_cert = "certs/link-neighbor.pem"
+client_key = "certs/link-neighbor.key"
 
 [[neighbors]]
 network = "C"

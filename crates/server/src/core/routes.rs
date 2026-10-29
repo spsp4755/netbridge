@@ -52,7 +52,10 @@ impl Core {
                     None => true,
                     Some("ToInternal") => *r == Route::new(NetId::external(), NetId::internal()),
                     Some("ToExternal") => *r == Route::new(NetId::internal(), NetId::external()),
-                    Some(_) => false,
+                    Some(d) => {
+                        tracing::warn!("결재 규칙(방향 {d})을 옮길 통로가 없어 건너뜁니다. 관리자 콘솔의 통로 정책에서 다시 지정하세요");
+                        false
+                    }
                 };
                 if applies {
                     if let Ok(rule) = serde_json::from_value::<ApprovalRule>(v.clone()) {

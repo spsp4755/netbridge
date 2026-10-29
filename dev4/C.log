@@ -1,0 +1,2 @@
+[2m2026-10-29T08:05:58.790948Z[0m [32m INFO[0m [2mnetbridge_server::server[0m[2m:[0m network C server listening on 0.0.0.0:38443, link on 127.0.0.1:39443
+[2m2026-10-29T08:05:58.832348Z[0m [32m INFO[0m [2mnetbridge_server::link[0m[2m:[0m internal server linked

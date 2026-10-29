@@ -134,5 +134,9 @@ fn policy_diff(old: &Policy, new: &Policy) -> String {
     let b = serde_json::to_value(new).unwrap_or_default();
     let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else { return String::new() };
     let parts: Vec<String> = b.iter().filter(|(k, v)| a.get(*k) != Some(v)).map(|(k, v)| format!("{k}: {} → {v}", a.get(k).cloned().unwrap_or_default())).collect();
-    if parts.is_empty() { "변경 없음".into() } else { parts.join("; ") }
+    if parts.is_empty() {
+        "변경 없음".into()
+    } else {
+        parts.join("; ")
+    }
 }

@@ -30,10 +30,15 @@ pub fn sanitize_name(name: &str) -> String {
     }
     let stem = clean.split('.').next().unwrap_or("").to_ascii_uppercase();
     let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit());
-    if reserved { format!("_{clean}") } else { clean }
+    if reserved {
+        format!("_{clean}")
+    } else {
+        clean
+    }
 }
 
-pub(super) const SELECT_TRANSFER: &str = "SELECT t.id, u.name, t.from_net || '>' || t.to_net, t.file_name, t.size, t.sha256, t.reason, t.state, t.mode, t.pii, t.unscannable, t.block_reason, t.sender_ip, t.receiver_ip, t.created_at,
+pub(super) const SELECT_TRANSFER: &str =
+    "SELECT t.id, u.name, t.from_net || '>' || t.to_net, t.file_name, t.size, t.sha256, t.reason, t.state, t.mode, t.pii, t.unscannable, t.block_reason, t.sender_ip, t.receiver_ip, t.created_at,
   a.id, a.mode, a.status, ap.name, dby.name, a.by_proxy, a.comment, a.decided_at, a.overdue, t.user_id, t.threats
   FROM transfers t JOIN users u ON u.id=t.user_id LEFT JOIN approvals a ON a.transfer_id=t.id
   LEFT JOIN users ap ON ap.id=a.approver_id LEFT JOIN users dby ON dby.id=a.decided_by";
@@ -81,15 +86,11 @@ pub(super) fn row_transfer(r: &Row) -> rusqlite::Result<TransferInfo> {
 
 impl Core {
     pub fn transfer_info(&self, id: i64) -> Result<TransferInfo, ApiError> {
-        self.db
-            .with(|c| c.query_row(&format!("{SELECT_TRANSFER} WHERE t.id=?1"), [id], row_transfer).optional())?
-            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "전송 건을 찾을 수 없습니다"))
+        self.db.with(|c| c.query_row(&format!("{SELECT_TRANSFER} WHERE t.id=?1"), [id], row_transfer).optional())?.ok_or_else(|| ApiError::new(ErrorCode::NotFound, "전송 건을 찾을 수 없습니다"))
     }
 
     pub(super) fn transfer_owner(&self, id: i64) -> Result<i64, ApiError> {
-        self.db
-            .with(|c| c.query_row("SELECT user_id FROM transfers WHERE id=?1", [id], |r| r.get(0)).optional())?
-            .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "전송 건을 찾을 수 없습니다"))
+        self.db.with(|c| c.query_row("SELECT user_id FROM transfers WHERE id=?1", [id], |r| r.get(0)).optional())?.ok_or_else(|| ApiError::new(ErrorCode::NotFound, "전송 건을 찾을 수 없습니다"))
     }
 
     pub(super) fn set_state(&self, id: i64, state: TransferState) -> Result<(), ApiError> {

@@ -102,14 +102,17 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Running> {
                 topo: Default::default(),
                 scanners: cfg.scanners.clone(),
             });
-            let link_tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert)?;
+            if cfg.hub_cert.is_none() {
+                tracing::warn!("[link] hub_cert 가 없어 CA 가 서명한 모든 인증서가 중앙 연계 주소에 접속할 수 있습니다");
+            }
+            let link_tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert, cfg.hub_cert.as_deref())?;
             let (link_addr, h1) = serve(cfg.link_listen.unwrap(), link_tls, link_router(relay.clone()))?;
             let backend: Arc<dyn Backend> = relay.clone();
             let (app_addr, h2) = serve(cfg.listen, app_tls, app_router(backend))?;
             let mut handles = vec![h1, h2];
             let mut neighbor_addr = None;
             if let Some(addr) = cfg.neighbor_listen {
-                let tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert)?;
+                let tls = certs::link_server_tls(&cfg.tls_cert, &cfg.tls_key, &cfg.ca_cert, None)?;
                 let (a, h) = serve(addr, tls, neighbor_router(relay.clone()))?;
                 neighbor_addr = Some(a);
                 handles.push(h);

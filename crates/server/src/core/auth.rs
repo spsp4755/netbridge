@@ -41,14 +41,15 @@ impl Core {
         let hash = hash_password(pw);
         let now = self.clock.now();
         let role = role_str(u.role);
-        self.db.with(|c| {
-            c.execute(
-                "INSERT INTO users(username,name,dept_id,role,approver_id,pw_hash,pw_changed_at,must_change,networks) VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)",
-                params![username, u.name.trim(), u.dept_id, role, u.approver_id, hash, now, serde_json::to_string(&u.networks).unwrap_or_else(|_| "[]".into())],
-            )?;
-            Ok(c.last_insert_rowid())
-        })
-        .map_err(|e| if e.message.contains("UNIQUE") { ApiError::bad("이미 있는 아이디입니다") } else { e })
+        self.db
+            .with(|c| {
+                c.execute(
+                    "INSERT INTO users(username,name,dept_id,role,approver_id,pw_hash,pw_changed_at,must_change,networks) VALUES(?1,?2,?3,?4,?5,?6,?7,1,?8)",
+                    params![username, u.name.trim(), u.dept_id, role, u.approver_id, hash, now, serde_json::to_string(&u.networks).unwrap_or_else(|_| "[]".into())],
+                )?;
+                Ok(c.last_insert_rowid())
+            })
+            .map_err(|e| if e.message.contains("UNIQUE") { ApiError::bad("이미 있는 아이디입니다") } else { e })
     }
 
     pub fn clear_must_change(&self, user_id: i64) -> Result<(), ApiError> {
@@ -58,10 +59,8 @@ impl Core {
     pub(super) async fn login(&self, ctx: &super::CallCtx, username: &str, password: &str, device_key: Option<&str>) -> ApiResult {
         let policy = self.db.policy()?;
         let row = self.db.with(|c| {
-            c.query_row("SELECT id, pw_hash, locked, fail_count FROM users WHERE username=?1", [username.trim()], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, i64>(3)?))
-            })
-            .optional()
+            c.query_row("SELECT id, pw_hash, locked, fail_count FROM users WHERE username=?1", [username.trim()], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?, r.get::<_, i64>(3)?)))
+                .optional()
         })?;
         let Some((uid, hash, locked, fails)) = row else {
             self.audit(None, "login_fail", Some(&ctx.client_ip), &format!("없는 아이디: {username}"));
@@ -105,9 +104,7 @@ impl Core {
 
     /// Registers this PC for the user on first login; afterwards the stored key must match.
     fn bind_device(&self, uid: i64, side: &NetId, key: Option<&str>) -> Result<String, ApiError> {
-        let existing = self.db.with(|c| {
-            c.query_row("SELECT key_hash FROM devices WHERE user_id=?1 AND side=?2", params![uid, side.as_str()], |r| r.get::<_, String>(0)).optional()
-        })?;
+        let existing = self.db.with(|c| c.query_row("SELECT key_hash FROM devices WHERE user_id=?1 AND side=?2", params![uid, side.as_str()], |r| r.get::<_, String>(0)).optional())?;
         match existing {
             Some(h) => match key {
                 Some(k) if sha(k) == h => Ok(k.to_string()),
@@ -151,11 +148,9 @@ impl Core {
         let policy = self.db.policy()?;
         let now = self.clock.now();
         let (name, dept, role, must, changed) = self.db.with(|db| {
-            db.query_row(
-                "SELECT u.name, d.name, u.role, u.must_change, u.pw_changed_at FROM users u LEFT JOIN depts d ON d.id=u.dept_id WHERE u.id=?1",
-                [c.user_id],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, i64>(4)?)),
-            )
+            db.query_row("SELECT u.name, d.name, u.role, u.must_change, u.pw_changed_at FROM users u LEFT JOIN depts d ON d.id=u.dept_id WHERE u.id=?1", [c.user_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, i64>(4)?))
+            })
         })?;
         let expired = policy.pw_max_age_days.is_some_and(|d| now - changed > d as i64 * 86400);
         Ok(Me {
@@ -182,7 +177,11 @@ pub fn role_str(r: Role) -> &'static str {
 }
 
 pub fn parse_role(s: &str) -> Role {
-    if s == "admin" { Role::Admin } else { Role::User }
+    if s == "admin" {
+        Role::Admin
+    } else {
+        Role::User
+    }
 }
 
 pub fn sha(s: &str) -> String {

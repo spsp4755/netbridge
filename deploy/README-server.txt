@@ -74,7 +74,9 @@ NetBridge 연계서버 설치 안내
   - 방화벽: 각 망 서버의 [link] listen(중앙 전용)은 중앙 서버 IP만, neighbor_listen 은 이웃 서버 IP만 허용하세요.
     파일은 C 서버에서 D 서버로 바로 가고 중앙(B) 서버를 거치지 않습니다. 받는 쪽은 해시를 확인합니다.
   - 인증서: netbridge-server gen-certs --server A=10.0.1.10 --server B=10.0.2.10 --server C=10.0.3.10 --server D=10.0.4.10
-    망마다 <망ID>.pem/.key 를 그 망 서버의 tls_cert/tls_key 로 쓰고, ca.pem 과 link-client.* 를 함께 둡니다.
+    망마다 <망ID>.pem/.key 를 그 망 서버의 tls_cert/tls_key 로 씁니다. ca.pem 은 모든 서버에 둡니다.
+    link-client.* 는 중앙 서버에만 둡니다(망 서버에는 link-client.pem 만, [link] hub_cert 로 지정).
+    link-neighbor.* 는 이웃 망으로 직접 보내는 망 서버(C·D)에 둡니다. 이 인증서로는 다른 망 서버의 중앙 연계 주소에 접속할 수 없습니다.
   - 통로별 정책(사용 여부, 클립보드, 한도, 확장자, 결재 규칙, 개인정보 조치, 파일 검사 조치)은
     중앙 망 PC의 관리자 콘솔 → "통로 정책" 탭에서 방향마다 따로 정합니다. 비워 둔 항목은 전역 값을 따릅니다.
   - 사용자별 사용 망은 관리자 콘솔 → 사용자 → 수정 → "사용 망" 에서 고릅니다 (기본: 모든 망).

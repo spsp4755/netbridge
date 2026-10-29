@@ -1,0 +1,43 @@
+role = "hub"
+network = "B"
+listen = "0.0.0.0:28443"
+data_dir = "data-B"
+tls_cert = "certs/B.pem"
+tls_key = "certs/B.key"
+ca_cert = "certs/ca.pem"
+[link]
+client_cert = "certs/link-client.pem"
+client_key = "certs/link-client.key"
+[[networks]]
+id = "A"
+name = "A망(인터넷)"
+[[networks]]
+id = "B"
+name = "B망(업무)"
+[[networks]]
+id = "C"
+name = "C망(개발)"
+[[networks]]
+id = "D"
+name = "D망(운영)"
+[[routes]]
+a = "A"
+b = "B"
+[[routes]]
+a = "B"
+b = "C"
+[[routes]]
+a = "B"
+b = "D"
+[[routes]]
+a = "C"
+b = "D"
+[[links]]
+network = "A"
+url = "https://127.0.0.1:19443"
+[[links]]
+network = "C"
+url = "https://127.0.0.1:39443"
+[[links]]
+network = "D"
+url = "https://127.0.0.1:49443"

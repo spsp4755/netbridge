@@ -1,11 +1,11 @@
+mod admin;
+mod approval;
 mod auth;
+mod clipboard;
 mod limits;
+mod routes;
 mod session;
 mod transfer;
-mod approval;
-mod clipboard;
-mod admin;
-mod routes;
 pub use session::DeviceRef;
 
 pub use approval::pick_mode;
@@ -250,7 +250,8 @@ impl Core {
 
     /// Pushes to every registered device of the user.
     pub async fn push_user(&self, user_id: i64, ev: Event) {
-        for (side, id) in self.devices_of(user_id).unwrap_or_default() {
+        let allowed = self.user_networks(user_id).unwrap_or_default();
+        for (side, id) in self.devices_of(user_id).unwrap_or_default().into_iter().filter(|(s, _)| allowed.contains(s)) {
             self.push(&side, id, ev.clone()).await;
         }
     }
@@ -265,12 +266,7 @@ impl Core {
 
     pub fn audit(&self, user: Option<(i64, &str)>, kind: &str, ip: Option<&str>, detail: &str) {
         let now = self.clock.now();
-        let _ = self.db.with(|c| {
-            c.execute(
-                "INSERT INTO audit(at,user_id,username,kind,ip,detail) VALUES(?1,?2,?3,?4,?5,?6)",
-                rusqlite::params![now, user.map(|u| u.0), user.map(|u| u.1), kind, ip, detail],
-            )
-        });
+        let _ = self.db.with(|c| c.execute("INSERT INTO audit(at,user_id,username,kind,ip,detail) VALUES(?1,?2,?3,?4,?5,?6)", rusqlite::params![now, user.map(|u| u.0), user.map(|u| u.1), kind, ip, detail]));
     }
 
     pub fn store_policy(&self, p: &Policy) -> Result<(), ApiError> {

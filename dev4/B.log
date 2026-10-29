@@ -1,0 +1,4 @@
+[2m2026-10-29T08:05:58.829852Z[0m [32m INFO[0m [2mnetbridge_server::server[0m[2m:[0m central server (B) listening on 0.0.0.0:28443, linking to 3 network(s)
+[2m2026-10-29T08:05:58.832367Z[0m [32m INFO[0m [2mnetbridge_server::link[0m[2m:[0m linked to network D
+[2m2026-10-29T08:05:58.832549Z[0m [32m INFO[0m [2mnetbridge_server::link[0m[2m:[0m linked to network C
+[2m2026-10-29T08:05:58.832711Z[0m [32m INFO[0m [2mnetbridge_server::link[0m[2m:[0m linked to network A

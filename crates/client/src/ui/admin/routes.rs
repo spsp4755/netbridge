@@ -35,20 +35,20 @@ pub fn routes(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     let routes = app.admin.routes.clone();
     let mut pick = None;
-    ui.columns(2, |cols| {
-        let ui = &mut cols[0];
-        ui.set_max_width(260.0);
-        for (i, p) in routes.iter().enumerate() {
-            let on = i == app.admin.route_sel;
-            let c = app.net_color(&p.route.from);
-            let text = format!("{}{}", app.route_label(&p.route), if p.enabled { "" } else { "  (사용 안 함)" });
-            let r = ui.add_sized([250.0, 30.0], egui::SelectableLabel::new(on, RichText::new(text).color(if p.enabled { c } else { MUTED })));
-            if r.clicked() {
-                pick = Some(i);
+    ui.horizontal_top(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(250.0);
+            for (i, p) in routes.iter().enumerate() {
+                let on = i == app.admin.route_sel;
+                let c = app.net_color(&p.route.from);
+                let text = format!("{}{}", app.route_label(&p.route), if p.enabled { "" } else { "  (사용 안 함)" });
+                if ui.add_sized([250.0, 30.0], egui::SelectableLabel::new(on, RichText::new(text).color(if p.enabled { c } else { MUTED }))).clicked() {
+                    pick = Some(i);
+                }
             }
-        }
-        let ui = &mut cols[1];
-        editor(app, ui);
+        });
+        ui.separator();
+        ui.vertical(|ui| editor(app, ui));
     });
     if let Some(i) = pick {
         select(app, i);
@@ -244,11 +244,12 @@ fn editor(app: &mut App, ui: &mut egui::Ui) {
     });
     if copy {
         if let Some(rev) = reverse.and_then(|r| app.admin.routes.iter().find(|p| p.route == r).cloned()) {
-            let route = app.admin.draft.as_ref().map(|d| d.route.clone()).unwrap_or(rev.route.clone());
+            let cur = app.admin.draft.clone().unwrap_or_else(|| rev.clone());
             app.admin.rule_exts = rev.approval_rules.iter().map(|r| exts_to_text(&r.exts)).collect();
             app.admin.r_blocked = rev.blocked_exts.as_deref().map(exts_to_text).unwrap_or_default();
             app.admin.r_allowed = rev.allowed_exts.as_deref().map(exts_to_text).unwrap_or_default();
-            app.admin.draft = Some(RoutePolicy { route, ..rev });
+            // rules only: whether this direction is on and allows clipboard stays as the admin set it
+            app.admin.draft = Some(RoutePolicy { route: cur.route, enabled: cur.enabled, clipboard: cur.clipboard, ..rev });
         }
     }
     if revert {

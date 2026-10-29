@@ -212,7 +212,7 @@ fn overview(app: &mut App, ui: &mut egui::Ui) {
     let both = a.sessions.iter().filter(|s| s.online.len() >= 2).count();
     ui.columns(4, |c| {
         stat_tile(&mut c[0], "사용자", a.users.len().to_string(), &format!("관리자 {admins} · 잠김 {locked}"), TEXT);
-        stat_tile(&mut c[1], "로그인 세션", a.sessions.len().to_string(), &format!("접속 중 {online} · 양쪽 망 {both}"), SUCCESS);
+        stat_tile(&mut c[1], "로그인 세션", a.sessions.len().to_string(), &format!("접속 중 {online} · 여러 망 {both}"), SUCCESS);
         stat_tile(&mut c[2], "부서", a.depts.len().to_string(), "결재선 기준 조직", TEXT);
         stat_tile(&mut c[3], "통로", a.routes.len().to_string(), &format!("사용 {} · 방향별 정책", a.routes.iter().filter(|r| r.enabled).count()), ACCENT);
     });

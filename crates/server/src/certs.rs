@@ -46,7 +46,8 @@ pub fn gen_certs_named(out: &Path, servers: &[(String, Vec<String>)]) -> Result<
     write("ca.pem", &ca_cert.pem())?;
     write("ca.key", &ca_key.serialize_pem())?;
     let link = vec!["netbridge-link".to_string()];
-    let all = servers.iter().map(|(n, h)| (n.as_str(), h.as_slice(), false)).chain([("link-client", link.as_slice(), true)]);
+    // link-client: the central server's certificate towards nodes; link-neighbor: nodes towards neighbor nodes
+    let all = servers.iter().map(|(n, h)| (n.as_str(), h.as_slice(), false)).chain([("link-client", link.as_slice(), true), ("link-neighbor", link.as_slice(), true)]);
     for (name, hosts, client) in all {
         let (cert, key) = leaf(&format!("NetBridge {name}"), hosts, client, &ca_cert, &ca_key)?;
         write(&format!("{name}.pem"), &cert)?;
@@ -81,10 +82,43 @@ pub fn server_tls(cert: &Path, key: &Path) -> Result<rustls::ServerConfig> {
     Ok(cfg)
 }
 
-/// TLS for the external server's link listener: a CA-signed client certificate is mandatory.
-pub fn link_server_tls(cert: &Path, key: &Path, ca: &Path) -> Result<rustls::ServerConfig> {
+/// Accepts only one exact client certificate (on top of the CA check): a node's link listener
+/// must take the central server, not a neighbor node that holds another CA-signed certificate.
+#[derive(Debug)]
+struct Pinned {
+    inner: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+    cert: CertificateDer<'static>,
+}
+
+impl rustls::server::danger::ClientCertVerifier for Pinned {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+    fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, intermediates: &[CertificateDer<'_>], now: rustls::pki_types::UnixTime) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        if end_entity.as_ref() != self.cert.as_ref() {
+            return Err(rustls::Error::General("not the central server's link certificate".into()));
+        }
+        self.inner.verify_client_cert(end_entity, intermediates, now)
+    }
+    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+/// TLS for a node's link listeners: a CA-signed client certificate is mandatory; with `pin`, only that certificate.
+pub fn link_server_tls(cert: &Path, key: &Path, ca: &Path, pin: Option<&Path>) -> Result<rustls::ServerConfig> {
     install_crypto();
-    let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store(ca)?)).build()?;
+    let mut verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store(ca)?)).build()?;
+    if let Some(p) = pin {
+        let cert = load_certs(p)?.into_iter().next().context("고정할 중앙 서버 인증서가 비어 있습니다")?;
+        verifier = Arc::new(Pinned { inner: verifier, cert });
+    }
     let mut cfg = rustls::ServerConfig::builder().with_client_cert_verifier(verifier).with_single_cert(load_certs(cert)?, load_key(key)?)?;
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(cfg)

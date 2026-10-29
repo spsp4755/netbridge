@@ -8,6 +8,8 @@ tls_key = "certs/server.key"
 ca_cert = "certs/ca.pem"
 
 [link]
+# 중앙 서버의 연계 인증서. 중앙 연계 주소(listen)에는 이 인증서만 접속할 수 있습니다
+hub_cert = "certs/link-client.pem"
 # 중앙 서버(B)가 접속해 오는 주소 (연계 구간 NIC 의 IP 로 제한하세요)
 listen = "10.0.1.10:19443"
 

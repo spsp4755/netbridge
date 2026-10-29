@@ -138,7 +138,9 @@ fn user_form(app: &mut App, ui: &mut egui::Ui) {
                 if !every {
                     for n in &all {
                         let mut on = f.networks.contains(n);
-                        if ui.checkbox(&mut on, app.name(n)).changed() {
+                        // the last network cannot be unticked: an empty list means "every network"
+                        let last = on && f.networks.len() == 1;
+                        if ui.add_enabled(!last, egui::Checkbox::new(&mut on, app.name(n))).changed() {
                             if on {
                                 f.networks.push(n.clone());
                             } else {

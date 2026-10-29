@@ -1,0 +1,9 @@
+role = "node"
+network = "A"
+listen = "0.0.0.0:18443"
+data_dir = "data-A"
+tls_cert = "certs/A.pem"
+tls_key = "certs/A.key"
+ca_cert = "certs/ca.pem"
+[link]
+listen = "127.0.0.1:19443"

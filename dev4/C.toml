@@ -1,0 +1,15 @@
+role = "node"
+network = "C"
+listen = "0.0.0.0:38443"
+data_dir = "data-C"
+tls_cert = "certs/C.pem"
+tls_key = "certs/C.key"
+ca_cert = "certs/ca.pem"
+[link]
+listen = "127.0.0.1:39443"
+neighbor_listen = "127.0.0.1:39444"
+client_cert = "certs/link-client.pem"
+client_key = "certs/link-client.key"
+[[neighbors]]
+network = "D"
+url = "https://127.0.0.1:49444"

@@ -49,6 +49,8 @@ pub struct ServerConfig {
     pub link_listen: Option<SocketAddr>,
     /// Node: listener for neighbor nodes; accepts only file pushes the central server confirms.
     pub neighbor_listen: Option<SocketAddr>,
+    /// Node: the central server's link certificate; `link_listen` accepts no other client.
+    pub hub_cert: Option<PathBuf>,
     /// Client certificate for outgoing links (central → nodes, node → neighbors).
     pub client_cert: Option<PathBuf>,
     pub client_key: Option<PathBuf>,
@@ -93,6 +95,7 @@ struct Raw {
 struct RawLink {
     listen: Option<SocketAddr>,
     neighbor_listen: Option<SocketAddr>,
+    hub_cert: Option<PathBuf>,
     /// Legacy internal server: the external server's link listener.
     external_url: Option<String>,
     client_cert: Option<PathBuf>,
@@ -116,7 +119,7 @@ impl ServerConfig {
         for p in [&mut cfg.data_dir, &mut cfg.tls_cert, &mut cfg.tls_key, &mut cfg.ca_cert, &mut cfg.log_dir] {
             *p = base.join(&*p);
         }
-        for p in [&mut cfg.client_cert, &mut cfg.client_key].into_iter().flatten() {
+        for p in [&mut cfg.client_cert, &mut cfg.client_key, &mut cfg.hub_cert].into_iter().flatten() {
             *p = base.join(&*p);
         }
         Ok(cfg)
@@ -136,6 +139,7 @@ impl ServerConfig {
             log_keep_days: r.log_keep_days,
             link_listen: r.link.listen,
             neighbor_listen: r.link.neighbor_listen,
+            hub_cert: r.link.hub_cert,
             client_cert: r.link.client_cert,
             client_key: r.link.client_key,
             topology: None,
@@ -186,6 +190,9 @@ impl ServerConfig {
                 if self.link_listen.is_none() {
                     bail!("망 서버(node)는 [link] listen 값이 필요합니다");
                 }
+                if self.hub_cert.is_none() && self.network != NetId::external() {
+                    bail!("망 서버(node)는 [link] hub_cert 값이 필요합니다 (중앙 서버의 link-client.pem; 이 인증서만 중앙 연계 주소에 접속할 수 있음)");
+                }
                 if !self.neighbors.is_empty() && (self.client_cert.is_none() || self.client_key.is_none()) {
                     bail!("[[neighbors]] 를 쓰려면 [link] client_cert, client_key 값이 필요합니다");
                 }
@@ -200,6 +207,9 @@ impl ServerConfig {
                     bail!("[[networks]] 에 중앙 서버의 망 {} 이 없습니다", self.network);
                 }
                 for r in &t.routes {
+                    if r.from == r.to {
+                        bail!("[[routes]] 에 같은 망끼리의 통로가 있습니다: {}", r.from);
+                    }
                     for id in [&r.from, &r.to] {
                         if !known(id) {
                             bail!("[[routes]] 의 망 {id} 이 [[networks]] 에 없습니다");

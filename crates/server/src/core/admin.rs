@@ -33,6 +33,17 @@ impl Core {
                         id
                     }
                 };
+                // PCs on networks the user may no longer use are disconnected and unregistered
+                let allowed = self.user_networks(id)?;
+                for (side, dev) in self.devices_of(id)?.into_iter().filter(|(s, _)| !allowed.contains(s)) {
+                    self.push(&side, dev, Event::SessionEnded { reason: format!("{} 사용 권한이 해제되었습니다", self.topo.name(&side)) }).await;
+                    if self.is_local(&side) {
+                        self.hub.drop_device(dev);
+                    } else if let Ok(p) = self.peer(&side) {
+                        let _ = p.drop_device(dev).await;
+                    }
+                    self.db.with(|db| db.execute("DELETE FROM devices WHERE id=?1", [dev]))?;
+                }
                 self.audit(me, "admin", ip, &format!("사용자 저장: {} ({})", user.username, user.name));
                 Ok(ApiResponse::Id(id))
             }
@@ -51,8 +62,7 @@ impl Core {
                 Ok(ApiResponse::Ok)
             }
             AdminRequest::ReleaseDevice { user_id, side } => {
-                let dev: Option<i64> =
-                    self.db.with(|db| db.query_row("SELECT id FROM devices WHERE user_id=?1 AND side=?2", params![user_id, side.as_str()], |r| r.get(0)).optional())?;
+                let dev: Option<i64> = self.db.with(|db| db.query_row("SELECT id FROM devices WHERE user_id=?1 AND side=?2", params![user_id, side.as_str()], |r| r.get(0)).optional())?;
                 // a released (possibly lost) PC must stop receiving tokens and clipboard
                 self.end_user_sessions(c, user_id, "관리자가 PC 등록을 해제했습니다").await?;
                 if let Some(d) = dev {
@@ -119,12 +129,9 @@ impl Core {
             AdminRequest::QueryAudit { query } => self.query_audit(&query).map(ApiResponse::Audit),
             AdminRequest::ListSessions => self.list_sessions().await.map(ApiResponse::Sessions),
             AdminRequest::KillSession { session_id } => {
-                let row: Option<(i64, String)> = self.db.with(|db| {
-                    db.query_row("SELECT s.user_id, u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?1 AND s.ended_at IS NULL", [session_id], |r| {
-                        Ok((r.get(0)?, r.get(1)?))
-                    })
-                    .optional()
-                })?;
+                let row: Option<(i64, String)> = self
+                    .db
+                    .with(|db| db.query_row("SELECT s.user_id, u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=?1 AND s.ended_at IS NULL", [session_id], |r| Ok((r.get(0)?, r.get(1)?))).optional())?;
                 let (uid, username) = row.ok_or_else(|| ApiError::new(ErrorCode::NotFound, "이미 끝난 세션입니다"))?;
                 let target = Caller { session_id, user_id: uid, username: username.clone(), role: Role::User, side: c.side.clone(), ip: c.ip.clone() };
                 self.logout(&target, "관리자가 세션을 종료했습니다").await?;
@@ -223,12 +230,7 @@ impl Core {
         })?;
         rows.into_iter()
             .map(|(id, uid, username, name, created_at, last_seen)| {
-                let mut online: Vec<Side> = self
-                    .devices_of(uid)?
-                    .into_iter()
-                    .filter(|(s, d)| live.iter().any(|(n, ids)| n == s && ids.contains(d)))
-                    .map(|(s, _)| s)
-                    .collect();
+                let mut online: Vec<Side> = self.devices_of(uid)?.into_iter().filter(|(s, d)| live.iter().any(|(n, ids)| n == s && ids.contains(d))).map(|(s, _)| s).collect();
                 online.sort();
                 Ok(SessionInfo { id, username, name, created_at, last_seen, online })
             })
@@ -242,5 +244,9 @@ fn route_diff(old: &RoutePolicy, new: &RoutePolicy) -> String {
     let b = serde_json::to_value(new).unwrap_or_default();
     let (Some(a), Some(b)) = (a.as_object(), b.as_object()) else { return String::new() };
     let v: Vec<String> = b.iter().filter(|(k, v)| a.get(*k) != Some(*v)).map(|(k, v)| format!("{k}: {} → {v}", a.get(k).cloned().unwrap_or_default())).collect();
-    if v.is_empty() { "변경 없음".into() } else { v.join(", ") }
+    if v.is_empty() {
+        "변경 없음".into()
+    } else {
+        v.join(", ")
+    }
 }
