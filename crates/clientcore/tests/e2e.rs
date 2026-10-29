@@ -264,3 +264,17 @@ async fn unknown_device_key_is_rejected_by_ws() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn ws_accepts_device_key_header_only() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let e = env().await;
+    let (_a_ext, a_int, _b, ikey) = setup(&e).await;
+    login(&a_int, "a", Some(ikey.clone())).await;
+    let tls = Arc::new(netbridge_clientcore::net::tls_config(&e.ca()).unwrap());
+    let url = format!("{}/ws", a_int.base().replacen("https://", "wss://", 1));
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert(DEVICE_KEY_HEADER, ikey.parse().unwrap());
+    let r = tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(tokio_tungstenite::Connector::Rustls(tls))).await;
+    assert!(r.is_ok(), "{:?}", r.err());
+}

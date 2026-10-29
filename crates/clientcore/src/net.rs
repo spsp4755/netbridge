@@ -194,10 +194,19 @@ impl Net {
         tokio::spawn(async move {
             let mut backoff = 1u64;
             loop {
-                let mut url = url::Url::parse(&format!("{}/ws", self.base.replacen("https://", "wss://", 1))).expect("url");
-                url.query_pairs_mut().append_pair("device_key", &device_key);
+                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+                let url = format!("{}/ws", self.base.replacen("https://", "wss://", 1));
+                let mut req = url.into_client_request().expect("url");
+                // a header, not the query string, so the key never lands in access logs
+                match device_key.parse() {
+                    Ok(v) => req.headers_mut().insert(DEVICE_KEY_HEADER, v),
+                    Err(_) => {
+                        let _ = tx.send(NetEvent::Rejected);
+                        return;
+                    }
+                };
                 let connector = tokio_tungstenite::Connector::Rustls(self.ws_tls.clone());
-                match tokio_tungstenite::connect_async_tls_with_config(url.as_str(), None, false, Some(connector)).await {
+                match tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(connector)).await {
                     Ok((mut ws, _)) => {
                         backoff = 1;
                         if tx.send(NetEvent::Connected).is_err() {

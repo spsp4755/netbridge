@@ -4,6 +4,9 @@ mod types;
 pub use api::*;
 pub use types::*;
 
+/// HTTP header carrying the device key on /ws (kept out of URLs, which end up in logs).
+pub const DEVICE_KEY_HEADER: &str = "x-netbridge-device-key";
+
 #[cfg(test)]
 mod tests {
     use super::*;

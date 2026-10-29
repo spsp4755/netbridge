@@ -86,8 +86,9 @@ async fn api(State(b): State<B>, ConnectInfo(addr): ConnectInfo<SocketAddr>, hea
     Ok(Json(b.api(ctx_of(b.side(), &headers, addr), req).await?))
 }
 
-async fn ws(State(b): State<B>, Query(q): Query<HashMap<String, String>>, upgrade: WebSocketUpgrade) -> Result<Response, ErrResp> {
-    let key = q.get("device_key").cloned().unwrap_or_default();
+async fn ws(State(b): State<B>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, upgrade: WebSocketUpgrade) -> Result<Response, ErrResp> {
+    // shortcut: the ?device_key= query is still read for 0.1.x apps; drop it once every PC runs 0.2+
+    let key = headers.get(DEVICE_KEY_HEADER).and_then(|v| v.to_str().ok()).map(String::from).or_else(|| q.get("device_key").cloned()).unwrap_or_default();
     let dev = b.device(&key).await?.ok_or_else(|| ApiError::new(ErrorCode::Unauthorized, "등록되지 않은 기기입니다"))?;
     Ok(upgrade.on_upgrade(move |socket| run_ws(socket, b, dev)))
 }
