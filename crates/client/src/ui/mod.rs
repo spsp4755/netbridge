@@ -8,7 +8,8 @@ pub mod send;
 pub mod settings;
 pub mod setup;
 
-use eframe::egui::{self, Color32, RichText};
+pub use crate::theme::*;
+use eframe::egui;
 use netbridge_proto::*;
 
 pub fn fmt_bytes(b: u64) -> String {
@@ -30,15 +31,19 @@ pub fn fmt_ts(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0).map(|d| d.with_timezone(&kst).format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
-pub fn state_text(s: TransferState) -> RichText {
-    let c = match s {
-        TransferState::Available => Color32::from_rgb(20, 120, 60),
-        TransferState::Downloaded => Color32::from_rgb(90, 90, 90),
-        TransferState::Pending | TransferState::Uploading | TransferState::AwaitingReason | TransferState::Delivering => Color32::from_rgb(180, 110, 0),
-        TransferState::Rejected | TransferState::Blocked => Color32::from_rgb(190, 40, 40),
-        TransferState::Expired => Color32::GRAY,
-    };
-    RichText::new(s.label()).color(c)
+pub fn state_tone(s: TransferState) -> Tone {
+    match s {
+        TransferState::Available => Tone::Success,
+        TransferState::Downloaded => Tone::Neutral,
+        TransferState::Pending | TransferState::Uploading | TransferState::Delivering => Tone::Info,
+        TransferState::AwaitingReason => Tone::Warn,
+        TransferState::Rejected | TransferState::Blocked => Tone::Danger,
+        TransferState::Expired => Tone::Neutral,
+    }
+}
+
+pub fn state_pill(ui: &mut egui::Ui, s: TransferState) -> egui::Response {
+    tone_pill(ui, s.label(), state_tone(s))
 }
 
 pub fn pii_summary(hits: &[PiiHit], unscannable: bool) -> String {
@@ -46,7 +51,11 @@ pub fn pii_summary(hits: &[PiiHit], unscannable: bool) -> String {
     if unscannable {
         v.push("내용 검사 불가".into());
     }
-    if v.is_empty() { "-".into() } else { v.join(", ") }
+    if v.is_empty() {
+        "-".into()
+    } else {
+        v.join(", ")
+    }
 }
 
 pub fn approval_text(a: &Option<ApprovalInfo>) -> String {
@@ -71,15 +80,9 @@ pub fn mb_edit(ui: &mut egui::Ui, bytes: &mut u64) -> egui::Response {
     r
 }
 
-pub fn title(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(4.0);
-    ui.heading(text);
-    ui.add_space(6.0);
-}
-
 pub fn error_line(ui: &mut egui::Ui, e: &Option<String>) {
     if let Some(e) = e {
-        ui.label(RichText::new(e).color(Color32::from_rgb(190, 40, 40)));
+        banner(ui, Tone::Danger, e);
     }
 }
 

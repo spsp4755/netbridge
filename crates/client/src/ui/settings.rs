@@ -1,6 +1,6 @@
 use crate::app::App;
 use crate::hotkey;
-use crate::ui::{error_line, title};
+use crate::ui::*;
 use eframe::egui::{self, RichText};
 use netbridge_clientcore::config::DEFAULT_HOTKEY;
 use netbridge_proto::*;
@@ -23,19 +23,66 @@ pub struct State {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    title(ui, "설정");
+    page_header(ui, "설정", Some("이 PC에만 적용되는 설정과 내 계정 설정입니다."));
+    card(ui, |ui| hotkey_section(app, ui));
+    ui.add_space(10.0);
+    card(ui, |ui| {
+        section_title(ui, "받은 파일 저장 폴더");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(app.cfg.download_dir.display().to_string()).monospace());
+            if ui.add(secondary("바꾸기")).clicked() {
+                if let Some(p) = rfd::FileDialog::new().set_directory(&app.cfg.download_dir).pick_folder() {
+                    app.cfg.download_dir = p;
+                    save(app);
+                }
+            }
+            if ui.add(secondary("열기")).clicked() {
+                let _ = std::fs::create_dir_all(&app.cfg.download_dir);
+                let _ = open::that(&app.cfg.download_dir);
+            }
+        });
+    });
+    ui.add_space(10.0);
+    card(ui, |ui| {
+        section_title(ui, "비밀번호 변경");
+        password_form(app, ui);
+    });
+    ui.add_space(10.0);
+    card(ui, |ui| {
+        section_title(ui, "연결 정보");
+        let me = app.me.as_ref();
+        kv_grid(
+            ui,
+            "conn",
+            &[
+                ("서버", app.cfg.server_url.clone()),
+                ("CA 인증서", app.cfg.ca_pem_path.display().to_string()),
+                ("내 IP", me.map(|m| m.client_ip.clone()).unwrap_or_default()),
+                ("계정", me.map(|m| format!("{} ({})", m.name, m.username)).unwrap_or_default()),
+                ("버전", env!("CARGO_PKG_VERSION").to_string()),
+            ],
+        );
+        ui.add_space(4.0);
+        if ui.add(secondary("프로그램 정보")).clicked() {
+            app.about = true;
+        }
+    });
+}
 
-    ui.strong("클립보드 단축키");
-    ui.label(format!("텍스트를 복사한 뒤 단축키를 누르면 {} PC의 클립보드로 보냅니다.", app.side.map(|s| s.other().label()).unwrap_or("반대편 망")));
+fn hotkey_section(app: &mut App, ui: &mut egui::Ui) {
+    section_title(ui, "클립보드 단축키");
+    ui.label(muted(format!("텍스트를 복사한 뒤 단축키를 누르면 {} PC의 클립보드로 보냅니다.", app.side.map(|s| s.other().label()).unwrap_or("반대편 망"))));
     ui.horizontal(|ui| {
-        ui.label(RichText::new(&app.cfg.hotkey).monospace().size(16.0));
+        egui::Frame::new().fill(NEUTRAL_SOFT).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.label(bold(if app.settings.capturing { "…" } else { &app.cfg.hotkey }, 16.0));
+        });
         if app.settings.capturing {
-            ui.label("새 단축키를 누르세요 (취소: Esc)");
-        } else if ui.button("변경").clicked() {
+            ui.label(RichText::new("새 단축키를 누르세요 (취소: Esc)").color(ACCENT));
+        } else if ui.add(secondary("변경")).clicked() {
             app.settings.capturing = true;
             app.settings.hotkey_error = None;
         }
-        if app.cfg.hotkey != DEFAULT_HOTKEY && ui.button("기본값(Alt+F3)").clicked() {
+        if app.cfg.hotkey != DEFAULT_HOTKEY && ui.add(secondary("기본값(Alt+F3)")).clicked() {
             apply_hotkey(app, DEFAULT_HOTKEY.to_string());
         }
     });
@@ -57,28 +104,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     error_line(ui, &app.settings.hotkey_error);
     error_line(ui, &app.hotkey_error);
-
-    ui.add_space(14.0);
-    ui.strong("받은 파일 저장 폴더");
-    ui.horizontal(|ui| {
-        ui.label(app.cfg.download_dir.display().to_string());
-        if ui.button("바꾸기").clicked() {
-            if let Some(p) = rfd::FileDialog::new().set_directory(&app.cfg.download_dir).pick_folder() {
-                app.cfg.download_dir = p;
-                save(app);
-            }
-        }
-    });
-
-    ui.add_space(14.0);
-    ui.strong("비밀번호 변경");
-    password_form(app, ui);
-
-    ui.add_space(14.0);
-    ui.strong("연결 정보");
-    ui.label(format!("서버: {}", app.cfg.server_url));
-    ui.label(format!("CA 인증서: {}", app.cfg.ca_pem_path.display()));
-    ui.label(format!("버전: {}", env!("CARGO_PKG_VERSION")));
 }
 
 fn save(app: &mut App) {
@@ -106,22 +131,18 @@ fn apply_hotkey(app: &mut App, s: String) {
 
 fn password_form(app: &mut App, ui: &mut egui::Ui) {
     let pw = &mut app.settings.pw;
-    egui::Grid::new("pw").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-        ui.label("현재 비밀번호");
-        ui.add(egui::TextEdit::singleline(&mut pw.old).password(true).desired_width(220.0));
-        ui.end_row();
-        ui.label("새 비밀번호");
-        ui.add(egui::TextEdit::singleline(&mut pw.new).password(true).desired_width(220.0));
-        ui.end_row();
-        ui.label("새 비밀번호 확인");
-        ui.add(egui::TextEdit::singleline(&mut pw.confirm).password(true).desired_width(220.0));
-        ui.end_row();
+    egui::Grid::new("pw").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+        for (label, field) in [("현재 비밀번호", &mut pw.old), ("새 비밀번호", &mut pw.new), ("새 비밀번호 확인", &mut pw.confirm)] {
+            ui.label(muted(label));
+            ui.add(egui::TextEdit::singleline(field).password(true).desired_width(260.0).margin(egui::vec2(10.0, 7.0)));
+            ui.end_row();
+        }
     });
     if let Some(p) = app.me.as_ref().map(|m| &m.policy) {
-        ui.label(RichText::new(format!("{}자 이상{}", p.pw_min_len, if p.pw_require_mix { ", 영문·숫자·특수문자 포함" } else { "" })).small());
+        ui.label(RichText::new(format!("{}자 이상{}", p.pw_min_len, if p.pw_require_mix { ", 영문·숫자·특수문자 포함" } else { "" })).small().color(MUTED));
     }
     error_line(ui, &app.settings.pw.error);
-    if ui.button("비밀번호 변경").clicked() {
+    if ui.add(primary("비밀번호 변경")).clicked() {
         let pw = &mut app.settings.pw;
         if pw.new != pw.confirm {
             pw.error = Some("새 비밀번호가 서로 다릅니다".into());
@@ -141,12 +162,13 @@ fn password_form(app: &mut App, ui: &mut egui::Ui) {
 
 pub fn forced_password_modal(app: &mut App, ctx: &egui::Context) {
     egui::Modal::new(egui::Id::new("forcepw")).show(ctx, |ui| {
-        ui.set_width(380.0);
-        ui.heading("비밀번호를 바꿔 주세요");
-        ui.label("처음 로그인했거나 비밀번호 사용 기간이 지났습니다.");
-        ui.add_space(6.0);
+        ui.set_width(440.0);
+        ui.label(bold("비밀번호를 바꿔 주세요", 19.0));
+        ui.label(muted("처음 로그인했거나 비밀번호 사용 기간이 지났습니다. 바꾸기 전에는 다른 기능을 쓸 수 없습니다."));
+        ui.add_space(8.0);
         password_form(app, ui);
-        if ui.small_button("로그아웃").clicked() {
+        ui.separator();
+        if ui.add(egui::Button::new("로그아웃").small()).clicked() {
             app.logout();
         }
     });

@@ -1,5 +1,5 @@
 use crate::app::App;
-use crate::ui::{fmt_bytes, fmt_ts, pii_summary, title};
+use crate::ui::*;
 use eframe::egui::{self, Color32, RichText};
 use netbridge_proto::*;
 use std::collections::HashMap;
@@ -22,66 +22,78 @@ pub fn refresh(app: &mut App) {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    title(ui, "결재함");
-    if ui.button("새로고침").clicked() {
-        refresh(app);
-    }
-    ui.add_space(6.0);
+    page_header(ui, "결재함", Some("내가 결재할 전송 요청입니다. 사전결재는 승인해야 전달되고, 사후결재는 이미 전달된 파일을 확인합니다."));
     let pending: Vec<ApprovalItem> = app.approvals.items.iter().filter(|i| i.approval.status == ApprovalStatus::Pending).cloned().collect();
     let done: Vec<ApprovalItem> = app.approvals.items.iter().filter(|i| i.approval.status != ApprovalStatus::Pending).cloned().collect();
-    ui.strong(format!("결재 대기 {}건", pending.len()));
+    ui.horizontal(|ui| {
+        tone_pill(ui, &format!("결재 대기 {}", pending.len()), if pending.is_empty() { Tone::Neutral } else { Tone::Warn });
+        tone_pill(ui, &format!("처리 {}", done.len()), Tone::Neutral);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(secondary("⟳ 새로고침")).clicked() {
+                refresh(app);
+            }
+        });
+    });
+    ui.add_space(8.0);
     if pending.is_empty() {
-        ui.label(if app.approvals.loaded { "대기 중인 결재가 없습니다." } else { "불러오는 중…" });
+        card(ui, |ui| {
+            if app.approvals.loaded {
+                empty_state(ui, "✔", "대기 중인 결재가 없습니다", "새 결재 요청이 오면 알림과 함께 여기에 나타납니다.");
+            } else {
+                empty_state(ui, "⟳", "불러오는 중…", "잠시만 기다려 주세요.");
+            }
+        });
     }
     let mut action: Option<(i64, bool)> = None;
     let mut preview: Option<TransferInfo> = None;
     for it in &pending {
         let t = &it.transfer;
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        card(ui, |ui| {
             ui.horizontal(|ui| {
-                let badge = match it.approval.mode {
-                    ApprovalMode::Pre => RichText::new("사전결재").color(Color32::from_rgb(180, 110, 0)).strong(),
-                    ApprovalMode::Post => RichText::new("사후결재 (이미 전달됨)").color(Color32::from_rgb(22, 93, 196)).strong(),
+                match it.approval.mode {
+                    ApprovalMode::Pre => tone_pill(ui, "사전결재", Tone::Warn),
+                    ApprovalMode::Post => tone_pill(ui, "사후결재 · 이미 전달됨", Tone::Info),
                 };
-                ui.label(badge);
                 if it.as_proxy {
-                    ui.label(RichText::new(format!("대결 · 원결재자 {}", it.approval.approver)).color(Color32::from_rgb(120, 60, 160)));
+                    pill(ui, &format!("대결 · 원결재자 {}", it.approval.approver), Color32::from_rgb(110, 60, 160), Color32::from_rgb(242, 234, 250));
                 }
                 if it.approval.overdue {
-                    ui.label(RichText::new("기한 초과").color(Color32::from_rgb(190, 40, 40)));
+                    tone_pill(ui, "기한 초과", Tone::Danger);
                 }
+                ui.label(bold(format!("{}  ({})", t.file_name, fmt_bytes(t.size)), 15.0));
             });
+            ui.add_space(4.0);
             egui::Grid::new(("ap", it.approval.id)).num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                ui.label("보낸 사람");
+                ui.label(muted("보낸 사람"));
                 ui.label(format!("{}  ({}, {})", t.owner, t.sender_ip, fmt_ts(t.created_at)));
                 ui.end_row();
-                ui.label("방향");
+                ui.label(muted("방향"));
                 ui.label(t.direction.label());
                 ui.end_row();
-                ui.label("파일");
+                ui.label(muted("파일"));
                 ui.label(format!("{}  ({})", t.file_name, fmt_bytes(t.size)));
                 ui.end_row();
-                ui.label("SHA-256");
+                ui.label(muted("SHA-256"));
                 ui.label(RichText::new(&t.sha256).monospace().small());
                 ui.end_row();
-                ui.label("사유");
+                ui.label(muted("사유"));
                 ui.label(&t.reason);
                 ui.end_row();
-                ui.label("개인정보");
+                ui.label(muted("개인정보"));
                 let s = pii_summary(&t.pii, t.unscannable);
                 ui.label(if s == "-" { RichText::new("탐지 없음") } else { RichText::new(s).color(Color32::from_rgb(190, 40, 40)) });
                 ui.end_row();
             });
             let comment = app.approvals.comments.entry(it.approval.id).or_default();
-            ui.add(egui::TextEdit::singleline(comment).hint_text("의견 (반려할 때 사유)").desired_width(400.0));
+            ui.add_space(4.0);
+            ui.add(egui::TextEdit::singleline(comment).hint_text("의견 (반려할 때는 필수)").desired_width(f32::INFINITY).margin(egui::vec2(10.0, 7.0)));
             ui.horizontal(|ui| {
                 let busy = app.approvals.busy == Some(it.approval.id);
                 ui.add_enabled_ui(!busy, |ui| {
-                    if ui.button(RichText::new("승인").strong()).clicked() {
+                    if ui.add(primary("승인")).clicked() {
                         action = Some((it.approval.id, true));
                     }
-                    if ui.button("반려").clicked() {
+                    if ui.add(danger("반려")).clicked() {
                         action = Some((it.approval.id, false));
                     }
                 });
@@ -89,7 +101,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let here = Some(t.direction.from_side()) == app.side;
                 if it.approval.mode == ApprovalMode::Pre {
                     if here {
-                        if ui.button("미리 보기").clicked() {
+                        if ui.add(secondary("미리 보기")).clicked() {
                             preview = Some(t.clone());
                         }
                     } else {
@@ -101,7 +113,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
-        ui.add_space(4.0);
+        ui.add_space(8.0);
     }
     if let Some((id, approve)) = action {
         let comment = app.approvals.comments.get(&id).cloned().filter(|s| !s.trim().is_empty());
@@ -125,18 +137,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if !done.is_empty() {
         ui.add_space(10.0);
-        ui.separator();
-        ui.strong("처리한 결재");
-        egui::Grid::new("done").striped(true).num_columns(5).spacing([16.0, 4.0]).show(ui, |ui| {
-            for it in &done {
-                let a = &it.approval;
-                ui.label(a.decided_at.map(fmt_ts).unwrap_or_default());
-                ui.label(&it.transfer.owner);
-                ui.label(&it.transfer.file_name);
-                ui.label(format!("{} {}{}", a.mode.label(), a.status.label(), if a.by_proxy { " (대결)" } else { "" }));
-                ui.label(a.comment.clone().unwrap_or_default());
+        card(ui, |ui| {
+            section_title(ui, "처리한 결재");
+            egui::Grid::new("done").striped(true).num_columns(5).spacing([20.0, 8.0]).show(ui, |ui| {
+                for c in ["처리 시각", "보낸 사람", "파일", "결과", "의견"] {
+                    ui.label(muted(c));
+                }
                 ui.end_row();
-            }
+                for it in &done {
+                    let a = &it.approval;
+                    ui.label(a.decided_at.map(fmt_ts).unwrap_or_default());
+                    ui.label(&it.transfer.owner);
+                    ui.label(&it.transfer.file_name);
+                    let tone = if a.status == ApprovalStatus::Approved { Tone::Success } else { Tone::Danger };
+                    tone_pill(ui, &format!("{} {}{}", a.mode.label(), a.status.label(), if a.by_proxy { " (대결)" } else { "" }), tone);
+                    ui.label(a.comment.clone().unwrap_or_default());
+                    ui.end_row();
+                }
+            });
         });
     }
 }

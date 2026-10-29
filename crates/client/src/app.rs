@@ -1,4 +1,5 @@
 use crate::hotkey::Hotkeys;
+use crate::theme::{self, Tone};
 use crate::ui;
 use eframe::egui::{self, Color32, RichText, ViewportCommand};
 use netbridge_clientcore::config::{config_dir, ClientConfig};
@@ -34,7 +35,7 @@ pub enum Screen {
 
 pub struct Toast {
     pub text: String,
-    pub error: bool,
+    pub tone: Tone,
     pub until: Instant,
 }
 
@@ -71,11 +72,15 @@ pub struct App {
     pub settings: ui::settings::State,
     pub admin: ui::admin::State,
     pub lock: ui::login::LockState,
+    pub logo: egui::TextureHandle,
+    pub about: bool,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, rt: tokio::runtime::Handle) -> App {
-        crate::fonts::install(&cc.egui_ctx);
+        theme::apply(&cc.egui_ctx);
+        let (rgba, n) = crate::icon::rgba();
+        let logo = cc.egui_ctx.load_texture("logo", egui::ColorImage::from_rgba_unmultiplied([n as usize, n as usize], &rgba), egui::TextureOptions::LINEAR);
         let (tx, rx) = channel();
         let loaded = ClientConfig::load();
         let mut app = App {
@@ -111,6 +116,8 @@ impl App {
             settings: Default::default(),
             admin: Default::default(),
             lock: Default::default(),
+            logo,
+            about: false,
         };
         app.setup.server_url = app.cfg.server_url.clone();
         app.setup.ca_path = app.cfg.ca_pem_path.display().to_string();
@@ -157,11 +164,26 @@ impl App {
     }
 
     pub fn toast(&mut self, text: impl Into<String>) {
-        self.toasts.push(Toast { text: text.into(), error: false, until: Instant::now() + Duration::from_secs(5) });
+        self.notify(text, Tone::Success, 5);
+    }
+
+    pub fn toast_info(&mut self, text: impl Into<String>) {
+        self.notify(text, Tone::Info, 6);
     }
 
     pub fn toast_err(&mut self, text: impl Into<String>) {
-        self.toasts.push(Toast { text: text.into(), error: true, until: Instant::now() + Duration::from_secs(8) });
+        self.notify(text, Tone::Danger, 8);
+    }
+
+    /// Shows a message in the corner; the same message again only extends the one on screen.
+    pub fn notify(&mut self, text: impl Into<String>, tone: Tone, secs: u64) {
+        let text = text.into();
+        let until = Instant::now() + Duration::from_secs(secs);
+        self.toasts.retain(|t| t.text != text);
+        self.toasts.push(Toast { text, tone, until });
+        if self.toasts.len() > 5 {
+            self.toasts.remove(0);
+        }
     }
 
     fn init_hotkey(&mut self) {
@@ -274,11 +296,11 @@ impl App {
                         self.local_logout(&reason);
                     }
                 }
-                Event::Clipboard { text, from_ip } => self.toast(format!("클립보드를 받았습니다 ({}자, {from_ip})", text.chars().count())),
+                Event::Clipboard { text, from_ip } => self.toast_info(format!("클립보드를 받았습니다 ({}자, {from_ip})", text.chars().count())),
                 Event::TransferUpdated { transfer } => {
                     let incoming = Some(transfer.direction.from_side()) != self.side;
                     if incoming && transfer.state == TransferState::Available {
-                        self.toast(format!("받을 파일이 도착했습니다: {}", transfer.file_name));
+                        self.toast_info(format!("받을 파일이 도착했습니다: {}", transfer.file_name));
                     } else if !incoming && matches!(transfer.state, TransferState::Rejected | TransferState::Blocked) {
                         self.toast_err(format!("{}: {}", transfer.file_name, transfer.state.label()));
                     }
@@ -287,10 +309,10 @@ impl App {
                     self.refresh_usage();
                 }
                 Event::ApprovalRequested { from, file_name, .. } => {
-                    self.toast(format!("결재 요청: {from} — {file_name}"));
+                    self.toast_info(format!("결재 요청: {from} — {file_name}"));
                     ui::approvals::refresh(self);
                 }
-                Event::Notice { message } => self.toasts.push(Toast { text: message, error: false, until: Instant::now() + Duration::from_secs(15) }),
+                Event::Notice { message } => self.notify(message, Tone::Info, 15),
                 Event::PolicyChanged { policy } => {
                     if let Some(me) = &mut self.me {
                         me.policy = policy;
@@ -363,7 +385,7 @@ impl App {
         self.delegation = Default::default();
         self.settings = Default::default();
         self.admin = Default::default();
-        self.toast(reason.to_string());
+        self.toast_info(reason.to_string());
     }
 
     pub fn is_admin_console(&self) -> bool {
@@ -390,68 +412,156 @@ impl App {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
             let (dot, label) = if self.events.is_empty() {
                 (Color32::GRAY, "로그인 전")
             } else if self.online {
-                (Color32::from_rgb(30, 160, 70), "연결됨")
+                (theme::SUCCESS, "연결됨")
             } else {
-                (Color32::from_rgb(200, 60, 50), "다시 연결 중…")
+                (theme::DANGER, "다시 연결 중…")
             };
-            ui.label(RichText::new("●").color(dot));
-            ui.label(label);
-            ui.separator();
+            ui.label(RichText::new("●").color(dot).size(11.0));
+            ui.label(RichText::new(label).small());
+            let item = |ui: &mut egui::Ui, k: &str, v: String| {
+                ui.label(RichText::new(k).small().color(theme::MUTED));
+                ui.add_space(-10.0);
+                ui.label(RichText::new(v).small());
+            };
             if let Some(side) = self.side {
-                ui.label(format!("{} 서버: {}", side.label(), self.cfg.server_url));
+                item(ui, &format!("{} 서버", side.label()), self.cfg.server_url.clone());
             }
             if let Some(me) = &self.me {
-                ui.separator();
-                ui.label(format!("내 IP: {}", me.client_ip));
-                ui.separator();
-                ui.label(format!("{} ({})", me.name, me.username));
+                item(ui, "내 IP", me.client_ip.clone());
             }
             if let Some(u) = &self.usage {
-                ui.separator();
-                ui.label(format!("오늘 사용량 {} / {}  (파일 1개 최대 {})", ui::fmt_bytes(u.used_today), ui::fmt_bytes(u.limits.daily_bytes), ui::fmt_bytes(u.limits.per_file_bytes)));
+                item(ui, "파일 1개 최대", ui::fmt_bytes(u.limits.per_file_bytes));
             }
             if self.me.is_some() {
-                ui.separator();
-                ui.label(format!("클립보드 단축키: {}", self.cfg.hotkey));
+                item(ui, "클립보드 단축키", self.cfg.hotkey.clone());
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).small().color(theme::MUTED));
+            });
         });
     }
 
-    fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.heading("NetBridge");
-        if let Some(side) = self.side {
-            ui.label(RichText::new(format!("{} PC", side.label())).color(Color32::from_rgb(22, 93, 196)).strong());
+    /// One row of the dark navigation. Returns true when clicked.
+    fn nav_item(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool, count: usize, accent: Color32) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(rect, 8.0, theme::NAV_SELECTED);
+            p.rect_filled(egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 9.0), egui::vec2(3.0, 22.0)), 2.0, accent);
+        } else if resp.hovered() {
+            p.rect_filled(rect, 8.0, Color32::from_rgb(26, 44, 75));
         }
-        ui.add_space(12.0);
+        let fg = if selected { Color32::WHITE } else { theme::NAV_TEXT };
+        p.text(rect.left_center() + egui::vec2(16.0, 0.0), egui::Align2::LEFT_CENTER, icon, egui::FontId::proportional(16.0), fg);
+        let font = if selected { egui::FontId::new(14.5, crate::fonts::bold()) } else { egui::FontId::proportional(14.5) };
+        p.text(rect.left_center() + egui::vec2(46.0, 0.0), egui::Align2::LEFT_CENTER, label, font, fg);
+        if count > 0 {
+            let text = if count > 99 { "99+".to_string() } else { count.to_string() };
+            let galley = p.layout_no_wrap(text, egui::FontId::new(11.5, crate::fonts::bold()), Color32::WHITE);
+            let w = (galley.size().x + 14.0).max(22.0);
+            let r = egui::Rect::from_center_size(rect.right_center() - egui::vec2(12.0 + w / 2.0, 0.0), egui::vec2(w, 20.0));
+            p.rect_filled(r, 10.0, theme::DANGER);
+            p.galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        resp.clicked()
+    }
+
+    fn nav(&mut self, ui: &mut egui::Ui) {
+        let accent = self.side.map(theme::side_color).unwrap_or(theme::ACCENT);
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(30.0, 30.0)));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.label(theme::bold("NetBridge", 17.0).color(Color32::WHITE));
+                ui.label(RichText::new("망연계 자료전송").small().color(theme::NAV_TEXT));
+            });
+        });
+        ui.add_space(14.0);
+        if let Some(side) = self.side {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                theme::pill(ui, &format!("●  {} PC", side.label()), Color32::WHITE, accent);
+            });
+        }
+        ui.add_space(16.0);
         let pending = self.approvals.items.iter().filter(|i| i.approval.status == ApprovalStatus::Pending).count();
-        let items: Vec<(Screen, String)> = vec![
-            (Screen::Send, "파일 보내기".into()),
-            (Screen::Inbox, "받은 파일".into()),
-            (Screen::Outgoing, "보낸 파일".into()),
-            (Screen::Approvals, if pending > 0 { format!("결재함 ({pending})") } else { "결재함".into() }),
-            (Screen::Delegation, "대결 지정".into()),
-            (Screen::Settings, "설정".into()),
+        let ready = self.inbox.items.iter().filter(|t| t.state == TransferState::Available).count();
+        let awaiting = self.outgoing.items.iter().filter(|t| t.state == TransferState::AwaitingReason).count();
+        let items = [
+            (Screen::Send, "⬆", "파일 보내기", 0),
+            (Screen::Inbox, "⬇", "받은 파일", ready),
+            (Screen::Outgoing, "☰", "보낸 파일", awaiting),
+            (Screen::Approvals, "✔", "결재함", pending),
+            (Screen::Delegation, "⇄", "대결 지정", 0),
+            (Screen::Settings, "⚙", "설정", 0),
         ];
-        for (s, label) in items {
-            if ui.add_sized([150.0, 28.0], egui::SelectableLabel::new(self.screen == s, label)).clicked() {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        for (s, icon, label, n) in items {
+            if Self::nav_item(ui, icon, label, self.screen == s, n, accent) {
                 self.go(s);
             }
         }
         if self.is_admin_console() {
-            ui.add_space(12.0);
-            ui.label(RichText::new("관리자").small());
-            if ui.add_sized([150.0, 28.0], egui::SelectableLabel::new(self.screen == Screen::Admin, "관리자 설정")).clicked() {
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.add_space(14.0);
+                ui.label(RichText::new("관리").small().color(Color32::from_rgb(130, 146, 172)));
+            });
+            if Self::nav_item(ui, "★", "관리자 콘솔", self.screen == Screen::Admin, 0, accent) {
                 self.go(Screen::Admin);
             }
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.add_space(8.0);
-            if ui.button("로그아웃").clicked() {
-                self.logout();
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                let b = |t: &str| egui::Button::new(RichText::new(t).color(theme::NAV_TEXT)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(52, 74, 110)));
+                if ui.add(b("로그아웃")).clicked() {
+                    self.logout();
+                }
+                if ui.add(b("정보")).clicked() {
+                    self.about = true;
+                }
+            });
+            if let Some(me) = &self.me {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    let initial: String = me.name.chars().next().map(|c| c.to_string()).unwrap_or_default();
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 17.0, accent);
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, initial, egui::FontId::new(15.0, crate::fonts::bold()), Color32::WHITE);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        let role = if me.role == Role::Admin { " · 관리자" } else { "" };
+                        ui.label(theme::bold(&me.name, 14.0).color(Color32::WHITE));
+                        ui.label(RichText::new(format!("{}{role}", me.username)).small().color(theme::NAV_TEXT));
+                    });
+                });
+            }
+            if let Some(u) = &self.usage {
+                ui.add_space(14.0);
+                let frac = if u.limits.daily_bytes > 0 { (u.used_today as f32 / u.limits.daily_bytes as f32).min(1.0) } else { 0.0 };
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width() - 8.0, 6.0), egui::Sense::hover());
+                        ui.painter().rect_filled(bar, 3.0, Color32::from_rgb(40, 60, 94));
+                        let mut done = bar;
+                        done.set_width((bar.width() * frac).max(if frac > 0.0 { 6.0 } else { 0.0 }));
+                        ui.painter().rect_filled(done, 3.0, if frac > 0.9 { theme::DANGER } else { accent });
+                        ui.label(RichText::new(format!("오늘 {} / {}", ui::fmt_bytes(u.used_today), ui::fmt_bytes(u.limits.daily_bytes))).small().color(theme::NAV_TEXT));
+                    });
+                });
             }
         });
     }
@@ -474,16 +584,78 @@ impl App {
         if self.toasts.is_empty() {
             return;
         }
-        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -40.0]).show(ctx, |ui| {
-            for t in self.toasts.iter().rev().take(5) {
-                let fill = if t.error { Color32::from_rgb(253, 236, 234) } else { Color32::from_rgb(232, 242, 253) };
-                egui::Frame::popup(ui.style()).fill(fill).show(ui, |ui| {
-                    ui.set_max_width(420.0);
-                    ui.label(&t.text);
-                });
+        let mut dismiss = None;
+        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -44.0]).order(egui::Order::Foreground).show(ctx, |ui| {
+            for (i, t) in self.toasts.iter().enumerate().rev() {
+                let (fg, _) = theme::tone_colors(t.tone);
+                let icon = match t.tone {
+                    Tone::Success => "✔",
+                    Tone::Danger => "⚠",
+                    _ => "ℹ",
+                };
+                let r = theme::card_frame()
+                    .inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 })
+                    .shadow(egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(35) })
+                    .show(ui, |ui| {
+                        ui.set_width(360.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icon).color(fg).size(16.0));
+                            ui.add(egui::Label::new(RichText::new(&t.text).color(theme::TEXT)).wrap());
+                        });
+                    });
+                let rect = r.response.rect;
+                ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(4.0, rect.height())), egui::CornerRadius { nw: 10, sw: 10, ne: 0, se: 0 }, fg);
+                if ui.interact(rect, egui::Id::new(("toast", i)), egui::Sense::click()).on_hover_text("눌러서 닫기").clicked() {
+                    dismiss = Some(i);
+                }
+                ui.add_space(6.0);
             }
         });
+        if let Some(i) = dismiss {
+            self.toasts.remove(i);
+        }
         ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    fn about_modal(&mut self, ctx: &egui::Context) {
+        if !self.about {
+            return;
+        }
+        let r = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(44.0, 44.0)));
+                ui.vertical(|ui| {
+                    ui.label(theme::bold("NetBridge 자료전송", 19.0));
+                    ui.label(theme::muted(format!("버전 {}", env!("CARGO_PKG_VERSION"))));
+                });
+            });
+            ui.add_space(8.0);
+            ui.label("폐쇄망과 인터넷망 사이의 파일·클립보드 전송, 결재, 개인정보 탐지, 감사 기록을 제공합니다.");
+            ui.add_space(6.0);
+            theme::kv_grid(
+                ui,
+                "about-kv",
+                &[
+                    ("라이선스", "MIT License".into()),
+                    ("글꼴", "나눔고딕 (SIL Open Font License 1.1)".into()),
+                    ("구성 요소", "Rust, egui/eframe, tokio, rustls, SQLite".into()),
+                    ("설정 폴더", config_dir().display().to_string()),
+                ],
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.add(theme::primary("닫기")).clicked() {
+                    self.about = false;
+                }
+                if ui.add(theme::secondary("설정 폴더 열기")).clicked() {
+                    let _ = open::that(config_dir());
+                }
+            });
+        });
+        if r.should_close() {
+            self.about = false;
+        }
     }
 }
 
@@ -548,22 +720,23 @@ impl eframe::App for App {
             }
             Phase::Connecting => {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    ui.centered_and_justified(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("서버에 연결하는 중…");
-                        });
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(ui.available_height() / 2.0 - 60.0);
+                        ui.add(egui::Image::new(&self.logo).fit_to_exact_size(egui::vec2(56.0, 56.0)));
+                        ui.add_space(10.0);
+                        ui.add(egui::Spinner::new().size(22.0).color(theme::ACCENT));
+                        ui.label(theme::muted(format!("서버에 연결하는 중…  {}", self.cfg.server_url)));
                     });
                 });
             }
             Phase::Login => {
-                egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
+                egui::TopBottomPanel::bottom("status").frame(status_frame()).show(ctx, |ui| self.status_bar(ui));
                 egui::CentralPanel::default().show(ctx, |ui| ui::login::show(self, ui));
             }
             Phase::Main => {
-                egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
-                egui::SidePanel::left("nav").resizable(false).exact_width(170.0).show(ctx, |ui| self.nav(ui));
-                egui::CentralPanel::default().show(ctx, |ui| {
+                egui::TopBottomPanel::bottom("status").frame(status_frame()).show(ctx, |ui| self.status_bar(ui));
+                egui::SidePanel::left("nav").resizable(false).exact_width(224.0).frame(egui::Frame::new().fill(theme::NAV_BG).inner_margin(egui::Margin::symmetric(10, 0))).show(ctx, |ui| self.nav(ui));
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 28, right: 28, top: 18, bottom: 8 })).show(ctx, |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.screen {
                         Screen::Send => ui::send::show(self, ui),
                         Screen::Inbox => ui::inbox::show(self, ui),
@@ -582,8 +755,13 @@ impl eframe::App for App {
                 }
             }
         }
+        self.about_modal(ctx);
         self.toasts(ctx);
     }
+}
+
+fn status_frame() -> egui::Frame {
+    egui::Frame::new().fill(theme::CARD).stroke(egui::Stroke::new(1.0_f32, theme::BORDER)).inner_margin(egui::Margin::symmetric(14, 5))
 }
 
 #[cfg(test)]
